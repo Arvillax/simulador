@@ -2,6 +2,7 @@ import type { SandboxEngine, SandboxMode } from './SandboxEngine.ts';
 import { SANDBOX_MODES } from './SandboxEngine.ts';
 import type { Body } from './BodyLook.ts';
 import {
+  COPILOT_COMMAND_EVENT,
   SIMULATION_CONTROL_EVENT,
   VECTOR_RANGES,
   etlVector,
@@ -97,11 +98,14 @@ export class TelemetryHUD {
   private readonly pauseButton: HTMLButtonElement;
   private readonly synthLine: HTMLElement;
   private readonly noteLine: HTMLElement;
+  private readonly root: HTMLElement;
+  private readonly onControlEvent: () => void;
   private lastRefreshMs = -Infinity;
   private shownMode: SandboxMode | null = null;
   private shownVersion = -1;
 
   constructor(root: HTMLElement, engine: SandboxEngine) {
+    this.root = root;
     this.engine = engine;
     root.classList.add('hud');
     root.replaceChildren();
@@ -135,7 +139,16 @@ export class TelemetryHUD {
       handleSimulationControl({ action: this.engine.isPaused() ? 'RESUME' : 'PAUSE' });
       this.syncPause();
     });
-    actions.append(edsButton, this.pauseButton);
+    const resetDustButton = el('button', 'hud-button', 'Reset dust');
+    resetDustButton.type = 'button';
+    resetDustButton.addEventListener('click', () => handleSimulationControl({ action: 'RESET_DUST' }));
+    const retractButton = el('button', 'hud-button', 'Retract bite');
+    retractButton.type = 'button';
+    retractButton.addEventListener('click', () => handleSimulationControl({ action: 'RETRACT_DRILL_BITE' }));
+    const wobButton = el('button', 'hud-button', 'Boost WOB');
+    wobButton.type = 'button';
+    wobButton.addEventListener('click', () => handleSimulationControl({ action: 'BOOST_DRILL_WOB' }));
+    actions.append(edsButton, this.pauseButton, resetDustButton, retractButton, wobButton);
     modeSection.append(actions);
 
     // Inputs
@@ -229,25 +242,38 @@ export class TelemetryHUD {
     root.append(header, modeSection, inputSection, telemetrySection);
 
     this.frameListener = (nowMs: number) => this.onFrame(nowMs);
-    // External control events may change mode or pause state while no frame runs.
-    window.addEventListener(SIMULATION_CONTROL_EVENT, () => {
+    this.onControlEvent = (): void => {
       this.syncMode();
       this.syncPause();
-    });
+    };
+    // External control events may change mode or pause state while no frame runs.
+    window.addEventListener(SIMULATION_CONTROL_EVENT, this.onControlEvent);
+    window.addEventListener(COPILOT_COMMAND_EVENT, this.onControlEvent);
     this.syncFromVector();
     this.syncMode();
   }
 
-  /** Applies a simulated preset (vector + gravity) through the bridge. */
+  /** Removes window listeners and detaches rendered HUD nodes cleanly on unmount. */
+  dispose(): void {
+    window.removeEventListener(SIMULATION_CONTROL_EVENT, this.onControlEvent);
+    window.removeEventListener(COPILOT_COMMAND_EVENT, this.onControlEvent);
+    this.root.replaceChildren();
+  }
+
+  /** Applies a simulated preset (vector + gravity + body lighting) through the bridge. */
   applyPreset(index: number): void {
     const preset = SIMULATED_PRESETS[index];
     if (preset === undefined) return;
     this.presetSelect.value = String(index);
     this.gravitySelect.value = String(preset.gravity);
     const v = preset.vector;
-    handleSimulationControl({ gravity: preset.gravity });
-    this.engine.setBody(preset.body, { sunlit: preset.sunlit !== false });
-    updateSandboxTerrain(v[0], v[1], v[2], v[3], v[4], v[5], Number(this.seedInput.value) || getSiteSeed());
+    handleSimulationControl({
+      body: preset.body,
+      gravity: preset.gravity,
+      sunlit: preset.sunlit !== false,
+      vector: [v[0], v[1], v[2], v[3], v[4], v[5]],
+      seed: Number(this.seedInput.value) || getSiteSeed(),
+    });
     this.syncFromVector();
   }
 

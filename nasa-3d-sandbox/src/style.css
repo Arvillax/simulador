@@ -104,6 +104,10 @@ body {
   margin-top: 6px;
 }
 
+.hud-actions .hud-button:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 .hud-button {
   padding: 7px 8px;
   font: inherit;
