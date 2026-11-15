@@ -17,7 +17,9 @@ import {
 } from 'three';
 import type { Material, Mesh, Object3D } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { DEFAULT_SITE_SEED, etlVector } from '../bridge/sandboxDataBridge.ts';
+import { SANDBOX_MODES } from '../bridge/copilotContract.ts';
+import type { SandboxMode } from '../bridge/copilotContract.ts';
+import { DEFAULT_SITE_SEED, emitTelemetryAlert, etlVector, siteState } from '../bridge/sandboxDataBridge.ts';
 import { PLOT_HALF, TerrainGenerator, sampleHeight } from './TerrainGenerator.ts';
 import { RockFieldInstancer } from './RockFieldInstancer.ts';
 import { DustSystemQuarks } from './DustSystemQuarks.ts';
@@ -48,9 +50,8 @@ import { IsruDrillSolver, MAX_ICE_WT, iceWeightFraction } from './solvers/IsruDr
 import { _v1, _v2, clamp } from './ScratchMath.ts';
 import { applyHardwareEnvironment, setHardwareSunlit } from './HardwareKit.ts';
 
-export type SandboxMode = 'ROVER' | 'SUIT_EDS' | 'LIDAR_LANDER' | 'ISRU_DRILL';
-
-export const SANDBOX_MODES: readonly SandboxMode[] = ['ROVER', 'SUIT_EDS', 'LIDAR_LANDER', 'ISRU_DRILL'];
+export { SANDBOX_MODES };
+export type { SandboxMode };
 
 export interface FrameTimings {
   /** Interval between consecutive rAF callbacks (ms). 0 on the first frame after a (re)start. */
@@ -201,6 +202,7 @@ export class SandboxEngine {
   readonly sunDirection = new Vector3(0, 1, 0);
   readonly solvers: Readonly<Record<SandboxMode, ModeSolver>>;
   readonly suit: SuitDustSolver;
+  readonly drill: IsruDrillSolver;
   /** Quality governor: render scale and shadow map from frame times. */
   readonly quality: QualityFacade;
   /** Benchmark-only hook around the render pass. Null by default (no effect on the frame path). */
@@ -214,6 +216,10 @@ export class SandboxEngine {
   private readonly backdrop: DataTexture;
   private readonly backdropData = new Uint8Array(BACKDROP_ROWS * 4);
   private readonly reducedMotion: MediaQueryList | null;
+  private readonly resizeObserver: ResizeObserver;
+  private readonly intersectionObserver: IntersectionObserver;
+  private readonly onVisibilityChange: () => void;
+  private readonly onPointerOrWheel: () => void;
   private fpsMeter: FpsMeter | null = null;
   private mode: SandboxMode = 'ROVER';
   private started = false;
@@ -322,16 +328,19 @@ export class SandboxEngine {
     const ctx: SolverContext = {
       vector: etlVector,
       physics: this.physics,
+      site: siteState,
       terrainMesh: this.terrain.mesh,
       timings: this.timings,
+      emitAlert: emitTelemetryAlert,
     };
     this.suit = new SuitDustSolver(ctx);
     this.suit.setFootfallSink(this.dust);
+    this.drill = new IsruDrillSolver(ctx);
     this.solvers = {
       ROVER: new RoverSolver(ctx),
       SUIT_EDS: this.suit,
       LIDAR_LANDER: new LidarBvhSolver(ctx),
-      ISRU_DRILL: new IsruDrillSolver(ctx),
+      ISRU_DRILL: this.drill,
     };
     for (const m of SANDBOX_MODES) {
       const group = this.solvers[m].group;
@@ -344,23 +353,26 @@ export class SandboxEngine {
     this.reducedMotion = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
 
     // The user takes over the camera: stop the travel where it is.
-    const cancelTravel = (): void => {
+    this.onPointerOrWheel = (): void => {
       this.travel = 1;
     };
-    canvas.addEventListener('pointerdown', cancelTravel, { passive: true });
-    canvas.addEventListener('wheel', cancelTravel, { passive: true });
+    canvas.addEventListener('pointerdown', this.onPointerOrWheel, { passive: true });
+    canvas.addEventListener('wheel', this.onPointerOrWheel, { passive: true });
 
     // Size from the container, not the window: the HUD rail docks beside the canvas.
-    new ResizeObserver(() => this.resize()).observe(this.container);
-    new IntersectionObserver((entries) => {
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(this.container);
+    this.intersectionObserver = new IntersectionObserver((entries) => {
       const entry = entries[entries.length - 1];
       this.offscreenPaused = entry !== undefined && !entry.isIntersecting;
       this.updateLoopState();
-    }).observe(canvas);
-    document.addEventListener('visibilitychange', () => {
+    });
+    this.intersectionObserver.observe(canvas);
+    this.onVisibilityChange = (): void => {
       this.hiddenPaused = document.hidden;
       this.updateLoopState();
-    });
+    };
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.hiddenPaused = document.hidden;
 
     // Hardware metal and glass reflect a small environment of the shown world (never the terrain).
@@ -452,6 +464,8 @@ export class SandboxEngine {
     }
     this.body = body;
     this.sunlit = sunlit;
+    siteState.body = body;
+    siteState.sunlit = sunlit;
     this.targetLook = lookFor(body, sunlit);
     applyHardwareEnvironment(this.renderer, body, sunlit);
     setHardwareSunlit(sunlit);
@@ -502,6 +516,22 @@ export class SandboxEngine {
   pulseEds(): void {
     this.suit.pulse();
     this.dust.triggerEdsSweep();
+    this.renderStill();
+  }
+
+  resetDust(): void {
+    this.suit.resetDust();
+    this.renderStill();
+  }
+
+  retractDrillBite(): void {
+    this.drill.retractBite();
+    this.renderStill();
+  }
+
+  boostDrillWob(): void {
+    this.drill.boostWob();
+    this.renderStill();
   }
 
   setGravity(g: number): void {
@@ -547,6 +577,24 @@ export class SandboxEngine {
   /** True while no frame is scheduled (user pause, hidden tab, canvas off screen, or not started). */
   isPaused(): boolean {
     return this.rafId === 0;
+  }
+
+  /** Stops the animation loop and releases DOM observers and WebGL resources. */
+  dispose(): void {
+    this.started = false;
+    if (this.rafId !== 0) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = 0;
+    }
+    this.resizeObserver.disconnect();
+    this.intersectionObserver.disconnect();
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    const dom = this.renderer.domElement;
+    dom.removeEventListener('pointerdown', this.onPointerOrWheel);
+    dom.removeEventListener('wheel', this.onPointerOrWheel);
+    this.controls.dispose();
+    this.backdrop.dispose();
+    this.renderer.dispose();
   }
 
   /** Compiles every mode scene with and without the shadow map, so neither variant stalls a later frame. */

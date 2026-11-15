@@ -8,6 +8,7 @@ import {
   createSoil,
   createSuspensionPose,
   createWheelSolution,
+  evaluateRoverEnvelope,
   soilFromVector,
   solveRockerBogie,
   solveWheel,
@@ -103,5 +104,19 @@ describe('rocker-bogie kinematics', () => {
     expect(pose.pitch).toBeGreaterThan(0);
     solveRockerBogie(0.4, 0.4, 0.4, 0.25, 0.25, 0.25, pose);
     expect(pose.roll).toBeGreaterThan(0);
+  });
+});
+
+describe('mission rover envelope profiles', () => {
+  it('enforces VIPER 10°/15°/0.20 m on Moon vs Perseverance 20°/30°/0.525 m on Mars', () => {
+    expect(evaluateRoverEnvelope('VIPER', 'moon', 12, 0.1)).toBe('yellow');
+    expect(evaluateRoverEnvelope('VIPER', 'moon', 16, 0.1)).toBe('red');
+    expect(evaluateRoverEnvelope('VIPER', 'moon', 8, 0.25)).toBe('yellow');
+    expect(evaluateRoverEnvelope('VIPER', 'moon', 8, 0.1, 0.22)).toBe('red');
+
+    expect(evaluateRoverEnvelope('PERSEVERANCE', 'mars', 16, 0.1)).toBe('green');
+    expect(evaluateRoverEnvelope('PERSEVERANCE', 'mars', 25, 0.1)).toBe('yellow');
+    expect(evaluateRoverEnvelope('PERSEVERANCE', 'mars', 31, 0.1)).toBe('red');
+    expect(evaluateRoverEnvelope('PERSEVERANCE', 'mars', 10, 0.6)).toBe('red');
   });
 });

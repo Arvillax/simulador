@@ -3,14 +3,21 @@ import { Mesh } from 'three';
 import {
   DustAccumulator,
   EDS_ENERGY_WH_PER_M2,
+  EDS_FREQUENCY_HZ,
+  EDS_POWER_W,
+  EDS_VOLTAGE_KV,
   PANEL_AREA_M2,
   PANEL_NOMINAL_W,
   SUIT_FIELDS,
   SuitDustSolver,
   dustRatePerSol,
+  effectiveDustRatePerSol,
+  orthofabricWearIndex,
+  solarAvailabilityFactor,
 } from './SuitDustSolver.ts';
 import { GAIT_NAMES } from '../GaitModel.ts';
 import type { SolverContext } from './ModeSolver.ts';
+import { createSitePhysicsState } from '../../bridge/copilotContract.ts';
 
 describe('suit telemetry fields', () => {
   it('keeps the EDS and panel cards and adds the gait cards', () => {
@@ -49,6 +56,8 @@ describe('gravity change re-evaluates the gait at once', () => {
       physics,
       terrainMesh: new Mesh(),
       timings: {} as SolverContext['timings'],
+      site: createSitePhysicsState(),
+      emitAlert: () => {},
     };
     const solver = new SuitDustSolver(ctx);
     solver.setSiteSeed(7);
@@ -117,5 +126,15 @@ describe('dust obscuration model', () => {
     expect(energy).toBeCloseTo(EDS_ENERGY_WH_PER_M2 * PANEL_AREA_M2, 12);
     expect(acc.pulses).toBe(1);
     expect(acc.edsEnergyWh).toBeCloseTo(energy, 12);
+  });
+
+  it('uses verified NASA 4 kV / 10 Hz / 3 W EDS rating and supports PSR + silica + Mars saltation scaling', () => {
+    expect(EDS_VOLTAGE_KV).toBe(4.0);
+    expect(EDS_FREQUENCY_HZ).toBe(10);
+    expect(EDS_POWER_W).toBe(3.0);
+    expect(effectiveDustRatePerSol(0.5, 'mars', 0.5)).toBeGreaterThan(dustRatePerSol(0.5));
+    expect(solarAvailabilityFactor('moon', true, 0)).toBe(0);
+    expect(solarAvailabilityFactor('moon', false, 1)).toBe(0);
+    expect(orthofabricWearIndex(70, 0.2)).toBeGreaterThan(orthofabricWearIndex(45, 0.2));
   });
 });

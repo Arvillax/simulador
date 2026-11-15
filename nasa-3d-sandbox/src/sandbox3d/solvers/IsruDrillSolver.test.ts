@@ -4,11 +4,15 @@ import {
   MSE_MIN,
   ROP_MAX,
   ROP_MIN,
+  TRIDENT_STALL_TORQUE_NM,
+  drillTorqueNm,
   hayneDryDensity,
   iceWeightFraction,
   icyDensity,
+  isDrillBitThermalCutoff,
   mechanicalSpecificEnergy,
   rateOfPenetration,
+  silicaLithologyFactor,
 } from './IsruDrillSolver.ts';
 
 describe('Hayne density profile', () => {
@@ -59,5 +63,17 @@ describe('MSE and ROP', () => {
     const icy = mechanicalSpecificEnergy(icyDensity(1.2, 45), iceWeightFraction(45));
     expect(icy).toBeGreaterThan(loose);
     expect(rateOfPenetration(icy)).toBeLessThan(rateOfPenetration(loose));
+  });
+
+  it('couples N4 silica lithology, 16 N*m TRIDENT stall, and Moon vs Mars thermal cutoff rules', () => {
+    expect(silicaLithologyFactor(45)).toBe(1.0);
+    expect(silicaLithologyFactor(70)).toBeGreaterThan(1.5);
+    expect(drillTorqueNm(100, 0.2, 1600, 0, 48)).toBeLessThan(TRIDENT_STALL_TORQUE_NM);
+    expect(drillTorqueNm(200, 1.0, 2200, 0.25, 72)).toBeGreaterThanOrEqual(TRIDENT_STALL_TORQUE_NM);
+
+    // Moon TRIDENT has no -5/0 °C bit heating cutoff (heat clears by 0.10 m bites); Mars Icebreaker cuts off > 0 °C.
+    expect(isDrillBitThermalCutoff('moon', 5)).toBe(false);
+    expect(isDrillBitThermalCutoff('mars', -5)).toBe(false);
+    expect(isDrillBitThermalCutoff('mars', 0.5)).toBe(true);
   });
 });

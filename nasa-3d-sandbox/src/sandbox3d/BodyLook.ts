@@ -273,9 +273,9 @@ export function isBody(value: unknown): value is Body {
   return value === 'moon' || value === 'mars' || value === 'earth';
 }
 
-const GRAVITY_TOLERANCE = 0.01;
+const GRAVITY_TOLERANCE = 0.02;
 
-/** 1.62 m/s² is the Moon, 3.71 m/s² is Mars, anything else is shown as the Earth analog. */
+/** 1.62 m/s² is the Moon, 3.71–3.72 m/s² is Mars, anything else is shown as the Earth analog. */
 export function bodyFromGravity(gravity: number): Body {
   if (Math.abs(gravity - 1.62) < GRAVITY_TOLERANCE) return 'moon';
   if (Math.abs(gravity - 3.71) < GRAVITY_TOLERANCE) return 'mars';
