@@ -36,6 +36,7 @@ describe('bodyFromGravity', () => {
   it('maps the three surface gravities, anything else is the Earth analog', () => {
     expect(bodyFromGravity(1.62)).toBe('moon');
     expect(bodyFromGravity(3.71)).toBe('mars');
+    expect(bodyFromGravity(3.72)).toBe('mars');
     expect(bodyFromGravity(9.81)).toBe('earth');
     expect(bodyFromGravity(5)).toBe('earth');
     expect(bodyFromGravity(0.1)).toBe('earth');
