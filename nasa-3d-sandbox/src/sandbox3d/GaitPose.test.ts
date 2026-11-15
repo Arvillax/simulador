@@ -1,8 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import { GaitWalker, createLegIk, flightArcHeight, solveLegIk } from './GaitPose.ts';
+import {
+  ARM_OPEN_MAX_RAD,
+  COMPRESSION_MAX_M,
+  COMPRESSION_MIN_M,
+  GaitWalker,
+  applySuitPose,
+  createLegIk,
+  createPoseState,
+  flightArcHeight,
+  landingCompression,
+  solveLegIk,
+} from './GaitPose.ts';
 import type { HeightFn, WalkerDims } from './GaitPose.ts';
-import { G_EARTH, G_MOON, createGaitInputs, createGaitState, solveGait } from './GaitModel.ts';
-import type { GaitState } from './GaitModel.ts';
+import { buildSuit } from './AssetBuilder.ts';
+import {
+  G_EARTH,
+  G_MARS,
+  G_MOON,
+  MAX_APEX_LEG_FRACTION,
+  createGaitInputs,
+  createGaitState,
+  solveGait,
+} from './GaitModel.ts';
+import type { GaitInputs, GaitState } from './GaitModel.ts';
 
 const DIMS: WalkerDims = { hipHalfWidth: 0.12, thigh: 0.42, shin: 0.4, ankleHeight: 0.1, legLength: 0.92, footLength: 0.3 };
 const flat: HeightFn = () => 0;
@@ -58,6 +78,148 @@ describe('two-bone leg IK', () => {
 describe('ballistic flight arc', () => {
   it('rises h = g t^2 / 8', () => {
     expect(flightArcHeight(1.62, 0.6)).toBeCloseTo((1.62 * 0.36) / 8, 12);
+  });
+});
+
+function solveWith(overrides: Partial<GaitInputs>): GaitState {
+  return solveGait(createGaitInputs({ roughness: 0.3, ...overrides }), createGaitState());
+}
+
+/** Runs the walker for `seconds` at 120 Hz and returns the extremes of the pelvis offset after a 2 s settle. */
+function offsetExtremes(w: GaitWalker, seconds: number): { min: number; max: number; airborne: number } {
+  let min = 0;
+  let max = 0;
+  let airborne = 0;
+  for (let f = 0; f < seconds * 120; f++) {
+    w.advance(1 / 120, 0, flat, flat);
+    if (f < 240) continue;
+    min = Math.min(min, w.bounceOffset);
+    max = Math.max(max, w.bounceOffset);
+    if (!w.feet[0].planted && !w.feet[1].planted) airborne++;
+  }
+  return { min, max, airborne };
+}
+
+describe('landing compression (knee flexion on landing)', () => {
+  it('grows with the vertical landing speed and stays inside its bounds', () => {
+    let previous = 0;
+    for (const v of [0, 0.2, 0.4, 0.6, 0.8, 1.0, 5]) {
+      const c = landingCompression(v);
+      expect(c).toBeGreaterThanOrEqual(COMPRESSION_MIN_M);
+      expect(c).toBeLessThanOrEqual(COMPRESSION_MAX_M);
+      expect(c).toBeGreaterThanOrEqual(previous);
+      previous = c;
+    }
+    expect(landingCompression(0.8)).toBeGreaterThan(landingCompression(0.2));
+    expect(landingCompression(5)).toBe(COMPRESSION_MAX_M);
+  });
+
+  it('dips the pelvis by the compression of the walker\'s own landing speed (v = g t / 2)', () => {
+    for (const g of [G_MOON, 2.2]) {
+      const state = solveWith({ gravity: g, forceGait: 'lope' });
+      const w = makeWalker(g);
+      w.setGait(state, g);
+      const { min } = offsetExtremes(w, 8);
+      expect(min).toBeLessThan(-0.9 * landingCompression(state.landingSpeed));
+      expect(min).toBeGreaterThanOrEqual(-landingCompression(state.landingSpeed) - 1e-9);
+    }
+  });
+
+  it('flexes the knee more after a harder landing', () => {
+    const slow = solveWith({ gravity: G_MOON, forceGait: 'lope' });
+    const wSlow = makeWalker(G_MOON);
+    wSlow.setGait(slow, G_MOON);
+    // A shorter contact (lower duty) leaves a longer flight and a harder landing: v = g t / 2.
+    const hard = { ...slow, dutyFactor: slow.dutyFactor - 0.06 };
+    const wHard = makeWalker(G_MOON);
+    wHard.setGait(hard, G_MOON);
+    expect(offsetExtremes(wHard, 8).min).toBeLessThan(offsetExtremes(wSlow, 8).min);
+  });
+});
+
+describe('visible ballistic arc across gravities', () => {
+  it('rises higher and flies longer at lower g for the same gait (forced lope)', () => {
+    const peaks: number[] = [];
+    const airborne: number[] = [];
+    for (const g of [1.62, 3.71, 9.81]) {
+      const w = makeWalker(g);
+      w.setGait(solveWith({ gravity: g, forceGait: 'lope' }), g);
+      const e = offsetExtremes(w, 10);
+      peaks.push(e.max);
+      airborne.push(e.airborne);
+    }
+    expect(peaks[0]).toBeGreaterThan(peaks[1]);
+    expect(peaks[1]).toBeGreaterThan(peaks[2]);
+    expect(peaks[0]).toBeGreaterThan(0.1);
+    expect(airborne[0]).toBeGreaterThan(airborne[1]);
+    expect(airborne[1]).toBeGreaterThan(airborne[2]);
+  });
+
+  it('never lifts the pelvis above the bound of the model, even at very low g', () => {
+    const g = 0.15;
+    const w = makeWalker(g);
+    w.setGait(solveWith({ gravity: g, forceGait: 'lope' }), g);
+    const e = offsetExtremes(w, 40);
+    expect(e.max).toBeGreaterThan(0.1);
+    expect(e.max).toBeLessThanOrEqual(MAX_APEX_LEG_FRACTION * DIMS.legLength + 1e-9);
+  });
+
+  it('follows a gravity change at once with an immediate gait switch and keeps planted feet still', () => {
+    const w = makeWalker(G_EARTH, wavy);
+    for (let f = 0; f < 240; f++) w.advance(1 / 120, 0.2, wavy, wavy);
+    expect(w.gait).toBe('walk');
+    w.setGait(solveWith({ gravity: G_MOON }), G_MOON, true);
+    expect(w.gait).toBe('lope');
+    expect(w.gravity).toBe(G_MOON);
+    const px = [0, 0];
+    const pz = [0, 0];
+    const was = [false, false];
+    let maxSlide = 0;
+    for (let f = 0; f < 600; f++) {
+      w.advance(1 / 120, 0.2, wavy, wavy);
+      expect(Number.isFinite(w.pelvisY)).toBe(true);
+      for (let i = 0; i < 2; i++) {
+        const foot = w.feet[i];
+        if (foot.planted && was[i]) maxSlide = Math.max(maxSlide, Math.hypot(foot.x - px[i], foot.z - pz[i]));
+        was[i] = foot.planted;
+        px[i] = foot.x;
+        pz[i] = foot.z;
+      }
+    }
+    expect(maxSlide).toBe(0);
+    let flights = 0;
+    for (let f = 0; f < 600; f++) {
+      w.advance(1 / 120, 0.2, wavy, wavy);
+      if (!w.feet[0].planted && !w.feet[1].planted) flights++;
+    }
+    expect(flights).toBeGreaterThan(50);
+  });
+});
+
+describe('arm balance in flight', () => {
+  function armOpenAfter(g: number, force: GaitInputs['forceGait']): number {
+    const rig = buildSuit();
+    const w = makeWalker(g);
+    w.setGait(solveWith({ gravity: g, forceGait: force }), g);
+    const pose = createPoseState();
+    let maxOpen = 0;
+    for (let f = 0; f < 1200; f++) {
+      w.advance(1 / 120, 0, flat, flat);
+      applySuitPose(rig, w, 0.4, 0, 1 / 120, pose);
+      if (f > 240) maxOpen = Math.max(maxOpen, rig.shoulderR.rotation.z === 0 ? 0 : -rig.shoulderR.rotation.z);
+    }
+    return maxOpen;
+  }
+
+  it('opens the arms in the flight phase of a lope and not in a walk, and opens them mirrored', () => {
+    expect(armOpenAfter(G_EARTH, null)).toBeLessThan(0.02);
+    const moon = armOpenAfter(G_MOON, null);
+    expect(moon).toBeGreaterThan(0.1);
+    expect(moon).toBeLessThanOrEqual(ARM_OPEN_MAX_RAD + 1e-9);
+  });
+
+  it('opens them more where the flight is longer (Moon vs Mars, forced lope)', () => {
+    expect(armOpenAfter(G_MOON, 'lope')).toBeGreaterThanOrEqual(armOpenAfter(G_MARS, 'lope'));
   });
 });
 

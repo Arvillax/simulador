@@ -7,6 +7,8 @@ export interface TelemetryField {
   readonly label: string;
   readonly unit: string;
   readonly digits: number;
+  /** Optional names: the card shows `text[round(value)]` instead of the number (e.g. the gait by name). */
+  readonly text?: readonly string[];
 }
 
 export interface PhysicsState {

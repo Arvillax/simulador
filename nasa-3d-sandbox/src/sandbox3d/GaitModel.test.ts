@@ -8,7 +8,9 @@ import {
   G_EARTH,
   G_MARS,
   G_MOON,
+  GAIT_NAMES,
   SUIT_MASS_A7LB_WET_KG,
+  TRANSITION_G_EXPONENT,
   apolloNumber,
   createGaitInputs,
   createGaitState,
@@ -18,6 +20,7 @@ import {
   humanMassFraction,
   slipMargin,
   solveGait,
+  transitionApollo,
 } from './GaitModel.ts';
 import type { GaitInputs, GaitState } from './GaitModel.ts';
 
@@ -60,12 +63,13 @@ describe('gait choice', () => {
     expect(earth.apollo).toBeLessThan(AP_TRANSITION);
   });
 
-  it('walks on Mars, with a slower cadence and a longer stride than on Earth', () => {
+  it('walks on Mars (extrapolation, not verified), slower and with a visibly longer stride than on Earth', () => {
     const mars = solve({ gravity: G_MARS });
     const earth = solve({ gravity: G_EARTH });
     expect(mars.gait).toBe('walk');
-    expect(mars.cadence).toBeLessThan(earth.cadence);
-    expect(mars.strideLength).toBeGreaterThan(earth.strideLength);
+    expect(mars.cadence).toBeLessThan(0.75 * earth.cadence);
+    expect(mars.strideLength).toBeGreaterThan(1.07 * earth.strideLength);
+    expect(mars.speed).toBeLessThan(0.8 * earth.speed);
   });
 
   it('gives the bouncing gait a flight phase and the walk none', () => {
@@ -93,16 +97,15 @@ describe('gait choice', () => {
 });
 
 describe('speed scaling', () => {
-  it('scales close to sqrt(g) between bodies on flat ground for the same gait', () => {
-    const ratio = Math.sqrt(G_EARTH / G_MOON);
+  it('scales with sqrt(g) times the low-gravity Froude rise between bodies on flat ground', () => {
+    // v = sqrt(Fr(g) · g · L) and the comfortable Fr of every gait rises as g^-k (the walk-run transition does).
+    const expected = Math.pow(G_EARTH / G_MOON, (1 - TRANSITION_G_EXPONENT) / 2);
     const walkMoon = solve({ gravity: G_MOON, forceGait: 'walk' });
     const walkEarth = solve({ gravity: G_EARTH, forceGait: 'walk' });
-    const r = walkEarth.speed / walkMoon.speed / ratio;
-    expect(r).toBeGreaterThan(0.9);
-    expect(r).toBeLessThan(1.1);
+    expect(walkEarth.speed / walkMoon.speed).toBeCloseTo(expected, 6);
     const lopeMoon = solve({ gravity: G_MOON, forceGait: 'lope' });
     const lopeEarth = solve({ gravity: G_EARTH, forceGait: 'lope' });
-    expect(lopeEarth.speed / lopeMoon.speed).toBeCloseTo(ratio, 9);
+    expect(lopeEarth.speed / lopeMoon.speed).toBeCloseTo(expected, 6);
   });
 
   it('lopes at the Apollo 11 speed on flat, smooth lunar ground', () => {
@@ -173,6 +176,131 @@ describe('determinism and allocation', () => {
   });
 });
 
+const SWEEP_G = [1.62, 2.5, 3.71, 6, 9.81] as const;
+/** Default site vector of the sandbox: roughness 0.72, flat along the heading. */
+const DEFAULT_SITE = { roughness: 0.72, slopeDeg: 0 };
+
+function decreasing(values: readonly number[], strict: boolean): boolean {
+  for (let i = 1; i < values.length; i++) {
+    if (strict ? values[i] >= values[i - 1] : values[i] > values[i - 1] + 1e-12) return false;
+  }
+  return true;
+}
+
+describe('gravity sweep (T10)', () => {
+  it('picks lope at the Moon and walk at Mars and Earth on the default site', () => {
+    expect(solve({ ...DEFAULT_SITE, gravity: 1.62 }).gait).toBe('lope');
+    // Mars is an extrapolation (not verified): the cost model puts the walk/lope crossover below 3.71 m/s².
+    expect(solve({ ...DEFAULT_SITE, gravity: 3.71 }).gait).toBe('walk');
+    expect(solve({ ...DEFAULT_SITE, gravity: 9.81 }).gait).toBe('walk');
+  });
+
+  it('lengthens flight, apex and stride and slows the cadence as g drops (automatic gait)', () => {
+    const s = SWEEP_G.map((g) => solve({ ...DEFAULT_SITE, gravity: g }));
+    expect(decreasing(s.map((x) => x.flightTime), false)).toBe(true);
+    expect(decreasing(s.map((x) => x.apexHeight), false)).toBe(true);
+    expect(decreasing(s.map((x) => x.strideLength), true)).toBe(true);
+    // Cadence follows the pendulum time inside a gait (the walk points); the gait switch itself steps it.
+    expect(decreasing(s.slice(1).map((x) => -x.cadence), true)).toBe(true);
+    expect(s[0].cadence).toBeLessThan(s[4].cadence);
+    expect(s[0].flightTime).toBeGreaterThan(0.5);
+    expect(s[0].apexHeight).toBeGreaterThan(0.1);
+    expect(s[4].flightTime).toBe(0);
+    expect(s[4].apexHeight).toBe(0);
+  });
+
+  it('keeps the same ordering for a forced lope (bouncing gait at every g)', () => {
+    const s = SWEEP_G.map((g) => solve({ ...DEFAULT_SITE, gravity: g, forceGait: 'lope' }));
+    expect(decreasing(s.map((x) => x.flightTime), true)).toBe(true);
+    expect(decreasing(s.map((x) => x.apexHeight), true)).toBe(true);
+    expect(decreasing(s.map((x) => x.strideLength), true)).toBe(true);
+    expect(decreasing(s.map((x) => -x.cadence), true)).toBe(true);
+    // Duty factor per foot grows with g (shorter flight share).
+    expect(decreasing(s.map((x) => -x.dutyFactor), true)).toBe(true);
+  });
+
+  it('swings slower at low g: swing time follows the pendulum time sqrt(L/g)', () => {
+    const swing = SWEEP_G.map((g) => {
+      const s = solve({ ...DEFAULT_SITE, gravity: g });
+      return (1 - s.dutyFactor) / s.strideFrequency;
+    });
+    expect(decreasing(swing.slice().reverse().map((x) => -x), true)).toBe(true);
+    // Between Mars and Earth (both walking) the swing time ratio is close to sqrt(g ratio).
+    expect(swing[2] / swing[4]).toBeGreaterThan(0.85 * Math.sqrt(G_EARTH / G_MARS));
+    expect(swing[2] / swing[4]).toBeLessThan(1.15 * Math.sqrt(G_EARTH / G_MARS));
+  });
+
+  it('reports the ballistic apex h = g t^2 / 8 and landing speed v = g t / 2', () => {
+    const s = solve({ ...DEFAULT_SITE, gravity: G_MOON });
+    expect(s.apexHeight).toBeCloseTo((G_MOON * s.flightTime * s.flightTime) / 8, 9);
+    expect(s.landingSpeed).toBeCloseTo((G_MOON * s.flightTime) / 2, 9);
+    expect(solve({ ...DEFAULT_SITE, gravity: G_EARTH }).landingSpeed).toBe(0);
+  });
+
+  it('lets the Moon lope fly visibly: both feet off the ground for a large share of the stride', () => {
+    const s = solve({ ...DEFAULT_SITE, gravity: G_MOON });
+    expect(1 - 2 * s.dutyFactor).toBeGreaterThan(0.35);
+  });
+});
+
+describe('transition scaling with gravity (T10.3)', () => {
+  it('equals the verified suited lunar Ap* at lunar g and falls as g rises', () => {
+    expect(transitionApollo(G_MOON)).toBeCloseTo(AP_TRANSITION, 12);
+    const values = SWEEP_G.map((g) => transitionApollo(g));
+    expect(decreasing(values, true)).toBe(true);
+  });
+
+  it('rescales the unsuited anchors: Fr* = 0.5 at 1 g and 0.9 at lunar g (Kram 1997, Carr & McGee 2009)', () => {
+    const suitFactor = transitionApollo(G_EARTH) / AP_TRANSITION;
+    expect(suitFactor).toBeCloseTo(0.5 / 0.9, 9);
+    expect(TRANSITION_G_EXPONENT).toBeCloseTo(Math.log(0.9 / 0.5) / Math.log(G_EARTH / G_MOON), 12);
+  });
+
+  it('keeps the Moon default at the Apollo 11 speed anchor, about 0.83 m/s on the default site', () => {
+    const s = solve({ ...DEFAULT_SITE, gravity: G_MOON });
+    expect(s.gait).toBe('lope');
+    expect(s.speed).toBeGreaterThan(0.8);
+    expect(s.speed).toBeLessThan(0.86);
+  });
+
+  it('makes the comfortable bouncing speed depend on g, not on one lunar anchor', () => {
+    const moon = solve({ gravity: G_MOON, roughness: 0, forceGait: 'lope' });
+    const mars = solve({ gravity: G_MARS, roughness: 0, forceGait: 'lope' });
+    const sqrtOnly = moon.speed * Math.sqrt(G_MARS / G_MOON);
+    // Froude rises toward low g, so the speed grows slower than sqrt(g) when g rises.
+    expect(mars.speed).toBeLessThan(sqrtOnly);
+    expect(mars.froude).toBeLessThan(moon.froude);
+  });
+
+  it('changes gait only once across a fine g sweep and moves continuously inside a gait', () => {
+    let previous = 'stand' as GaitState['gait'];
+    let prevSpeed = 0;
+    let prevStride = 0;
+    let changes = 0;
+    let lastG = 0;
+    for (let g = 1.0; g <= 12; g += 0.01) {
+      const s = solveGait(createGaitInputs({ gravity: g, legLength: LEG, ...DEFAULT_SITE, previousGait: previous }), createGaitState());
+      if (prevSpeed > 0 && s.gait === previous) {
+        expect(Math.abs(s.speed - prevSpeed) / prevSpeed).toBeLessThan(0.02);
+        expect(Math.abs(s.strideLength - prevStride) / prevStride).toBeLessThan(0.02);
+      } else if (prevSpeed > 0) {
+        changes++;
+        lastG = g;
+      }
+      previous = s.gait;
+      prevSpeed = s.speed;
+      prevStride = s.strideLength;
+    }
+    expect(changes).toBe(1);
+    expect(lastG).toBeGreaterThan(1.62);
+    expect(lastG).toBeLessThan(3.71);
+  });
+
+  it('names every gait for the HUD, indexed by GAIT_CODE', () => {
+    expect(GAIT_NAMES).toEqual(['stand', 'walk', 'lope', 'run']);
+  });
+});
+
 describe('footfall dust puff', () => {
   it('throws dust farther in low gravity and with speed', () => {
     const moon = footfallPuff(0.8, G_MOON, createPuffParams());
@@ -183,5 +311,16 @@ describe('footfall dust puff', () => {
     const slow = footfallPuff(0.2, G_MOON, createPuffParams());
     expect(slow.range).toBeLessThan(moon.range);
     expect(footfallPuff(0, G_MOON, createPuffParams()).count).toBeGreaterThanOrEqual(0);
+  });
+
+  it('throws farther, longer-lived and more motes at low g with the speed the gait model gives', () => {
+    const puffs = SWEEP_G.map((g) => footfallPuff(solve({ ...DEFAULT_SITE, gravity: g }).speed, g, createPuffParams()));
+    expect(decreasing(puffs.map((p) => p.range), true)).toBe(true);
+    expect(decreasing(puffs.map((p) => p.life), false)).toBe(true);
+    expect(decreasing(puffs.map((p) => p.count), false)).toBe(true);
+    // Slower at low g: the kick speed follows the walker speed, which falls with g (lope included).
+    expect(puffs[0].kickSpeed).toBeLessThan(puffs[4].kickSpeed);
+    // Ballistic range v²/g: the Moon throws dust several times farther than Earth.
+    expect(puffs[0].range / puffs[4].range).toBeGreaterThan(3);
   });
 });

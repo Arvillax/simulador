@@ -15,6 +15,9 @@ export type Gait = 'stand' | 'walk' | 'lope' | 'run';
 /** Numeric gait code for the HUD (telemetry fields are numeric). */
 export const GAIT_CODE: Readonly<Record<Gait, number>> = { stand: 0, walk: 1, lope: 2, run: 3 };
 
+/** Gait names indexed by GAIT_CODE (the HUD shows the name of the numeric code). */
+export const GAIT_NAMES: readonly Gait[] = ['stand', 'walk', 'lope', 'run'];
+
 // ------------------------------------------------------------------------------------------- Constants
 
 /** Standard Earth surface gravity (m/s²), reference of the Minetti 2001 scaling v_planet = v_earth·sqrt(g/g_earth). */
@@ -29,8 +32,19 @@ export const SUIT_MASS_A7LB_WET_KG = 96.0;
 /** Crew body mass (kg). not verified. */
 export const CREW_BODY_MASS_KG = 80;
 
-/** Suited walk to bouncing-gait transition, Apollo number Ap* = 0.68 ± 0.20. Carr & McGee 2009. */
+/** Suited walk to bouncing-gait transition at lunar g, Apollo number Ap* = 0.68 ± 0.20. Carr & McGee 2009. */
 export const AP_TRANSITION = 0.68;
+/** Unsuited walk-run transition Froude number at 1 g, Fr* ≈ 0.5. Kram, Domingo & Ferris 1997. */
+export const FR_TRANSITION_EARTH_UNSUITED = 0.5;
+/** Unsuited walk-run transition Froude number at lunar g, Fr* ≈ 0.9. Carr & McGee 2009. */
+export const FR_TRANSITION_MOON_UNSUITED = 0.9;
+/**
+ * Exponent k of the transition's rise toward low gravity, Fr*(g) ∝ g^-k, from the two verified anchors above:
+ * k = ln(0.9 / 0.5) / ln(g_earth / g_moon) ≈ 0.33. The power-law shape between (and beyond) the anchors is not
+ * verified, so every value at Mars gravity is an extrapolation (gait-sources.md).
+ */
+export const TRANSITION_G_EXPONENT =
+  Math.log(FR_TRANSITION_MOON_UNSUITED / FR_TRANSITION_EARTH_UNSUITED) / Math.log(G_EARTH / G_MOON);
 /** Lope stays selected down to this fraction of Ap* once chosen (hysteresis band). not verified. */
 const AP_HYSTERESIS = 0.9;
 
@@ -41,20 +55,17 @@ export const APOLLO16_RUN_METABOLIC_MIN_W = 326;
 export const APOLLO16_RUN_METABOLIC_MAX_W = 429;
 
 /**
- * Comfortable lope Froude number: the Apollo 11 speed estimate at lunar g with the 0.92 m suit leg of the rig,
- * Fr = 0.89² / (1.62 · 0.92) ≈ 0.53. Derived from Carr & McGee 2009; the leg length is the rig's (AssetBuilder).
+ * Comfortable lope Froude number at LUNAR g only (the calibration point): the Apollo 11 speed estimate with the
+ * 0.92 m suit leg of the rig, Fr = 0.89² / (1.62 · 0.92) ≈ 0.53. Derived from Carr & McGee 2009; the leg length is
+ * the rig's (AssetBuilder). At other g it follows the transition, see `comfortFroude`.
  */
-export const LOPE_COMFORT_FR = (APOLLO11_LUNAR_RUN_SPEED * APOLLO11_LUNAR_RUN_SPEED) / (G_MOON * 0.92);
+export const LOPE_COMFORT_FR_MOON = (APOLLO11_LUNAR_RUN_SPEED * APOLLO11_LUNAR_RUN_SPEED) / (G_MOON * 0.92);
 /**
- * Comfortable walk, as an Apollo number: the Fr ≈ 0.25 preferred-walking rule of thumb (not verified) held as
- * Ap = Fr / M with M = 1 unsuited, so the suit's carried mass slows the walk (Carr & McGee 2009 premise).
+ * Comfortable walk, as an Apollo number at 1 g: the Fr ≈ 0.25 preferred-walking rule of thumb (not verified) held as
+ * Ap = Fr / M with M = 1 unsuited, so the suit's carried mass slows the walk (Carr & McGee 2009 premise). In reduced
+ * gravity it rises with the walk-run transition, as g^-k (Kram, Domingo & Ferris 1997; exponent from the anchors).
  */
 export const WALK_COMFORT_AP = 0.25;
-/**
- * Walking Froude number rises in reduced gravity (limb swing does not scale): Kram, Domingo & Ferris 1997
- * (qualitative). The exponent of (g_earth / g) is not verified.
- */
-export const WALK_LOW_G_EXPONENT = 0.1;
 /** Comfortable run Froude number (kept for completeness; never chosen automatically). not verified. */
 export const RUN_COMFORT_FR = 1.0;
 
@@ -64,10 +75,10 @@ export const RUN_COMFORT_FR = 1.0;
  * in the Apollo 16 range and the walk/lope cost crossover sits between lunar and Mars gravity, which matches the
  * qualitative finding that bouncing gaits are far cheaper at lunar g (Rader, Newman & Carr 2007).
  */
-const COT_WALK_G = 0.2; // not verified
-const COT_WALK_B = 1.6; // not verified
-const COT_LOPE_G = 0.4; // not verified
-const COT_LOPE_B = 1.14; // not verified
+export const COT_WALK_G = 0.2; // not verified
+export const COT_WALK_B = 1.6; // not verified
+export const COT_LOPE_G = 0.4; // not verified
+export const COT_LOPE_B = 1.14; // not verified
 const COT_RUN_G = 0.42; // not verified
 const COT_RUN_B = 1.3; // not verified
 /** Resting metabolic rate of the suited crew member (W). not verified. */
@@ -88,8 +99,16 @@ const STRIDE_EXPONENT = 0.3;
 /** Walk duty factor = clamp(0.68 − 0.4·Fr, 0.55, 0.68). not verified. */
 const WALK_DUTY_MAX = 0.68;
 const WALK_DUTY_MIN = 0.55;
-/** Lope duty factor per foot; trail and lead contacts follow each other, then one flight. not verified. */
-const LOPE_DUTY = 0.35;
+/**
+ * Lope duty factor per foot = clamp(0.6 − 0.65·Fr, 0.22, 0.5): trail and lead contacts follow each other, then one
+ * flight of 1 − 2·duty of the stride. The higher the Froude number (the lower g), the longer the flight. not verified.
+ */
+const LOPE_DUTY_BASE = 0.6;
+const LOPE_DUTY_PER_FR = 0.65;
+const LOPE_DUTY_MIN = 0.22;
+const LOPE_DUTY_MAX = 0.5;
+/** Highest pelvis rise of a flight as a fraction of the leg length. Safety bound, not verified. */
+export const MAX_APEX_LEG_FRACTION = 0.3;
 /** Run duty factor = clamp(0.4 − 0.1·Fr, 0.25, 0.4); two flights per stride. not verified. */
 const RUN_DUTY_MAX = 0.4;
 const RUN_DUTY_MIN = 0.25;
@@ -138,6 +157,10 @@ export interface GaitState {
   dutyFactor: number;
   /** Airborne time per stride (s); 0 for the walk. */
   flightTime: number;
+  /** Pelvis rise of the ballistic flight, h = g·t² / 8, bounded by MAX_APEX_LEG_FRACTION · L (m); 0 for the walk. */
+  apexHeight: number;
+  /** Vertical landing speed of the flight, v = g·t / 2 (m/s); 0 for the walk. */
+  landingSpeed: number;
   froude: number;
   apollo: number;
   /** 1 − required / available friction; ≤ 0 means a slip. */
@@ -173,6 +196,8 @@ export function createGaitState(): GaitState {
     strideLength: 0,
     dutyFactor: 1,
     flightTime: 0,
+    apexHeight: 0,
+    landingSpeed: 0,
     froude: 0,
     apollo: 0,
     slipMargin: 1,
@@ -214,11 +239,24 @@ export function slopeSpeedFactor(slopeDeg: number, friction: number): number {
   return Math.sqrt(1 - h * h);
 }
 
-/** Comfortable Froude number of a gait at gravity g for human mass fraction M. */
+/**
+ * Suited walk to bouncing-gait Apollo number at gravity g: Ap*(g) = Ap*_moon · (g_moon / g)^k. Equals the verified
+ * Ap* = 0.68 at lunar g; at 1 g it is 0.68 · 0.5 / 0.9 ≈ 0.38 (the same suit factor as the unsuited anchors).
+ * Elsewhere it is an extrapolation, not verified.
+ */
+export function transitionApollo(gravity: number): number {
+  return AP_TRANSITION * Math.pow(G_MOON / gravity, TRANSITION_G_EXPONENT);
+}
+
+/**
+ * Comfortable Froude number of a gait at gravity g for human mass fraction M. The lope is calibrated at lunar g
+ * (Apollo 11) and follows the transition elsewhere (same Ap / Ap* ratio at every g); the walk follows it from the
+ * 1 g rule of thumb. Not verified away from the anchors.
+ */
 function comfortFroude(gait: Gait, gravity: number, massFraction: number): number {
-  if (gait === 'lope') return LOPE_COMFORT_FR;
+  if (gait === 'lope') return LOPE_COMFORT_FR_MOON * Math.pow(G_MOON / gravity, TRANSITION_G_EXPONENT);
   if (gait === 'run') return RUN_COMFORT_FR;
-  if (gait === 'walk') return WALK_COMFORT_AP * massFraction * Math.pow(G_EARTH / gravity, WALK_LOW_G_EXPONENT);
+  if (gait === 'walk') return WALK_COMFORT_AP * massFraction * Math.pow(G_EARTH / gravity, TRANSITION_G_EXPONENT);
   return 0;
 }
 
@@ -232,7 +270,7 @@ export function costOfTransport(gait: Gait, gravity: number): number {
 
 function dutyFactorOf(gait: Gait, froude: number): number {
   if (gait === 'walk') return Math.min(WALK_DUTY_MAX, Math.max(WALK_DUTY_MIN, WALK_DUTY_MAX - 0.4 * froude));
-  if (gait === 'lope') return LOPE_DUTY;
+  if (gait === 'lope') return Math.min(LOPE_DUTY_MAX, Math.max(LOPE_DUTY_MIN, LOPE_DUTY_BASE - LOPE_DUTY_PER_FR * froude));
   if (gait === 'run') return Math.min(RUN_DUTY_MAX, Math.max(RUN_DUTY_MIN, RUN_DUTY_MAX - 0.1 * froude));
   return 1;
 }
@@ -258,6 +296,8 @@ export function solveGait(inp: GaitInputs, out: GaitState): GaitState {
     out.strideLength = 0;
     out.dutyFactor = 1;
     out.flightTime = 0;
+    out.apexHeight = 0;
+    out.landingSpeed = 0;
     out.froude = 0;
     out.apollo = 0;
     out.metabolicW = REST_METABOLIC_W;
@@ -277,7 +317,7 @@ export function solveGait(inp: GaitInputs, out: GaitState): GaitState {
     if (gait === 'lope') {
       // A bouncing gait below the suited transition is not observed: fall back to the walk.
       const vLope = Math.sqrt(comfortFroude('lope', g, m)) * scale * factor;
-      const threshold = AP_TRANSITION * (inp.previousGait === 'lope' ? AP_HYSTERESIS : 1);
+      const threshold = transitionApollo(g) * (inp.previousGait === 'lope' ? AP_HYSTERESIS : 1);
       if (apolloNumber(froudeNumber(vLope, g, L), m) < threshold) gait = 'walk';
     }
   }
@@ -285,7 +325,7 @@ export function solveGait(inp: GaitInputs, out: GaitState): GaitState {
   let speed = Math.sqrt(comfortFroude(gait, g, m)) * scale * factor;
   if (gait === 'walk') {
     // An inverted-pendulum walk stays below the transition.
-    const vMax = Math.sqrt(AP_TRANSITION * m * g * L) * 0.98;
+    const vMax = Math.sqrt(transitionApollo(g) * m * g * L) * 0.98;
     if (speed > vMax) speed = vMax;
   }
   const fr = froudeNumber(speed, g, L);
@@ -300,7 +340,12 @@ export function solveGait(inp: GaitInputs, out: GaitState): GaitState {
   out.strideFrequency = freq;
   out.cadence = freq * 120;
   out.dutyFactor = duty;
-  out.flightTime = gait === 'walk' || freq <= 0 ? 0 : Math.max(0, 1 - 2 * duty) / freq;
+  const flight = gait === 'walk' || freq <= 0 ? 0 : Math.max(0, 1 - 2 * duty) / freq;
+  out.flightTime = flight;
+  const apex = (g * flight * flight) / 8;
+  const apexCap = MAX_APEX_LEG_FRACTION * L;
+  out.apexHeight = apex > apexCap ? apexCap : apex;
+  out.landingSpeed = (g * flight) / 2;
   out.froude = fr;
   out.apollo = apolloNumber(fr, m);
   const sinS = Math.sin(inp.slopeDeg * DEG);

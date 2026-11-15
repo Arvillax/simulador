@@ -20,6 +20,21 @@ Consulted 2026-11-15. Only constants listed here as verified may be used without
 | Froude number is a good first predictor of optimal walking speed and walk-run transition in other gravities | qualitative | Minetti 2001 |
 | Bouncing gaits (skip, lope, hop) become far cheaper at lunar g; Apollo crews mostly used a hopping or skipping "lunar gait" | qualitative | Rader, Newman & Carr 2007 (SAE 2007-01-3134); Pavei et al. / Minetti group |
 
+## Verified qualitatively in T10 (abstract or search summary read; exact figures not read)
+
+| Finding | Source |
+| :-- | :-- |
+| Skipping is never more economical than running, but the difference becomes marginal at lunar gravity; both bouncing gaits approach the cost of walking on Earth | Pavei, Biancardi & Minetti 2015, J Appl Physiol 119(1):93-100 |
+| On the Moon, two-footed hopping costs less than walking, skipping and running | Pavei & Minetti 2016, J Appl Physiol 120 (hopping) |
+| Predictive simulation finds skipping more efficient than walking or running at low gravity, and a walk-skip rather than a walk-run transition (two speeds, three gravity levels tested) | Ackermann & van den Bogert, predictive simulation of low-gravity gait |
+| Gait transitions in simulated reduced gravity are gradual, without an abrupt change in gait parameters | Ivanenko et al. 2011 (PubMed 21212248) |
+| Apollo crews mostly used a loping gait that alternates feet; some preferred skipping; the kangaroo hop was judged less effective for forward travel by Aldrin | Apollo accounts summarised in Discover and Air & Space articles |
+| Suited gait on complex lunar terrain may prefer an "Earth gait" for safety over least energy | Kim et al. 2023, Physiol Meas, doi 10.1088/1361-6579/acf993 |
+
+Consequence: the bouncing gaits (lope, skip, two-footed hop) must become cheaper than walking as g drops. No source
+gives a walk-to-skip Froude threshold or a speed at Mars gravity; any threshold at 0.38 g is an extrapolation and
+must carry the mark "not verified".
+
 ## Not verified (use only with the mark "not verified")
 
 - Preferred walking speed at Fr ≈ 0.25 (common rule of thumb; no primary source read).

@@ -1,5 +1,6 @@
 import type { SandboxEngine, SandboxMode } from './SandboxEngine.ts';
 import { SANDBOX_MODES } from './SandboxEngine.ts';
+import { bodyFromGravity } from './BodyLook.ts';
 import type { Body } from './BodyLook.ts';
 import {
   SIMULATION_CONTROL_EVENT,
@@ -195,7 +196,11 @@ export class TelemetryHUD {
     for (const [label, g] of GRAVITY_OPTIONS) this.gravitySelect.append(new Option(label, String(g)));
     this.gravitySelect.addEventListener('change', () => {
       this.presetSelect.value = '';
-      handleSimulationControl({ gravity: Number(this.gravitySelect.value) });
+      const g = Number(this.gravitySelect.value);
+      // The bridge switches the look with the gravity but resets "sunlit"; keep what the current preset says.
+      const sunlit = this.engine.isSunlit();
+      handleSimulationControl({ gravity: g });
+      this.engine.setBody(bodyFromGravity(g), { sunlit });
     });
     gravityLabel.append(this.gravitySelect);
     row.append(seedLabel, gravityLabel);
@@ -315,7 +320,9 @@ export class TelemetryHUD {
       const telemetry = solver.telemetry;
       const fields = solver.fields;
       for (let i = 0; i < fields.length; i++) {
-        panel.values[i].textContent = telemetry[fields[i].key].toFixed(fields[i].digits);
+        const field = fields[i];
+        const value = telemetry[field.key];
+        panel.values[i].textContent = field.text !== undefined ? (field.text[Math.round(value)] ?? '--') : value.toFixed(field.digits);
       }
     }
     const s = this.engine.synthTimings;

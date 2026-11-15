@@ -5,7 +5,7 @@ import { buildSuit } from '../AssetBuilder.ts';
 import type { SuitRig } from '../AssetBuilder.ts';
 import { sampleHeight } from '../TerrainGenerator.ts';
 import { clamp01 } from '../ScratchMath.ts';
-import { GAIT_CODE, createPuffParams, footfallPuff } from '../GaitModel.ts';
+import { GAIT_CODE, GAIT_NAMES, createPuffParams, footfallPuff, solveGait } from '../GaitModel.ts';
 import type { PuffParams } from '../GaitModel.ts';
 import { GaitWalker, applySuitPose, createPoseState } from '../GaitPose.ts';
 import { WalkController, feetGroundHeight } from '../WalkPath.ts';
@@ -18,6 +18,8 @@ export interface FootfallSink {
 /** The camera follows a low-passed walker position (time constant, s), so the pelvis bob never shakes it. */
 const FOCUS_SMOOTHING_S = 0.5;
 const FOCUS_HEIGHT_M = 1.3;
+/** A change of g larger than this (m/s²) re-evaluates the gait at once and drops the held-gait hysteresis. */
+const GRAVITY_CHANGE_EPS = 1e-3;
 
 export const PANEL_VOLTAGE_V = 32;
 export const PANEL_RESISTANCE_OHM = 4;
@@ -90,7 +92,7 @@ export type SuitTelemetry = {
   powerPct: number;
   edsEnergyWh: number;
   pulses: number;
-  /** GAIT_CODE: 0 stand, 1 walk, 2 lope, 3 run. */
+  /** GAIT_CODE: 0 stand, 1 walk, 2 lope, 3 run (the card shows the name). */
   gaitCode: number;
   speed: number;
   cadence: number;
@@ -101,6 +103,8 @@ export type SuitTelemetry = {
   metabolicW: number;
   /** Not shown as a card; airborne time per stride (s). */
   flightTime: number;
+  /** Not shown as a card; pelvis rise of the ballistic flight (m). */
+  apexHeight: number;
 };
 
 /**
@@ -114,7 +118,7 @@ export const SUIT_FIELDS: readonly TelemetryField[] = [
   { key: 'powerPct', label: 'Power', unit: '%', digits: 1 },
   { key: 'edsEnergyWh', label: 'EDS energy', unit: 'Wh', digits: 3 },
   { key: 'pulses', label: 'EDS pulses', unit: '', digits: 0 },
-  { key: 'gaitCode', label: 'Gait (0 stand · 1 walk · 2 lope · 3 run)', unit: '', digits: 0 },
+  { key: 'gaitCode', label: 'Gait', unit: '', digits: 0, text: GAIT_NAMES },
   { key: 'speed', label: 'Speed est.', unit: 'm/s', digits: 2 },
   { key: 'cadence', label: 'Cadence est.', unit: 'steps/min', digits: 0 },
   { key: 'stride', label: 'Stride est.', unit: 'm', digits: 2 },
@@ -148,6 +152,7 @@ export class SuitDustSolver implements ModeSolver {
     slipMarginPct: 0,
     metabolicW: 0,
     flightTime: 0,
+    apexHeight: 0,
   };
   readonly dust = new DustAccumulator();
   /** Walker state, steering and gait (read-only for callers; exposed for inspection). */
@@ -162,6 +167,7 @@ export class SuitDustSolver implements ModeSolver {
   private footfallSink: FootfallSink | null = null;
   private siteSeed = 1;
   private lastFootfalls = 0;
+  private lastGravity = 0;
   private edsFlash = 0;
 
   constructor(ctx: SolverContext) {
@@ -198,6 +204,7 @@ export class SuitDustSolver implements ModeSolver {
   onVectorChanged(): void {
     const c = this.controller;
     c.gravity = this.ctx.physics.gravity;
+    this.lastGravity = c.gravity;
     c.reset(this.siteSeed, this.ctx.vector[1], this.rig.legLength, 0, 0);
     this.walker.reset(0, 0, c.path.heading, feetGroundHeight);
     this.lastFootfalls = 0;
@@ -230,10 +237,12 @@ export class SuitDustSolver implements ModeSolver {
     const c = this.controller;
     const w = this.walker;
     c.gravity = g;
+    if (Math.abs(g - this.lastGravity) > GRAVITY_CHANGE_EPS) this.reevaluateGait(g);
     w.advance(dt, c, sampleHeight, feetGroundHeight);
     applySuitPose(rig, w, c.state.froude, c.grade, dt, this.pose);
     rig.elbow.rotation.z = -0.55 - 0.45 * Math.sin(t * 1.3);
-    rig.shoulder.rotation.z = 0.15 + 0.1 * Math.sin(t * 0.65);
+    // The left shoulder keeps its idle sway on top of the flight-phase arm opening that the pose wrote.
+    rig.shoulder.rotation.z = 0.15 + 0.1 * Math.sin(t * 0.65) + this.pose.armOpen;
     if (w.footfalls !== this.lastFootfalls) {
       this.lastFootfalls = w.footfalls;
       const sink = this.footfallSink;
@@ -249,6 +258,20 @@ export class SuitDustSolver implements ModeSolver {
     f.z += (w.z - f.z) * k;
     this.gaitMs = performance.now() - g0;
     this.writeTelemetry();
+  }
+
+  /**
+   * A change of surface gravity solves the gait again now, without the held-gait hysteresis (that band only filters
+   * noise at a constant g), and the walker switches to it at once. Reuses the controller's inputs: no allocation.
+   */
+  private reevaluateGait(g: number): void {
+    const c = this.controller;
+    const inp = c.inputs;
+    inp.gravity = g;
+    inp.previousGait = 'stand';
+    solveGait(inp, c.state);
+    this.walker.setGait(c.state, g, true);
+    this.lastGravity = g;
   }
 
   private writeTelemetry(): void {
@@ -270,5 +293,6 @@ export class SuitDustSolver implements ModeSolver {
     t.slipMarginPct = s.slipMargin * 100;
     t.metabolicW = s.metabolicW;
     t.flightTime = s.flightTime;
+    t.apexHeight = s.apexHeight;
   }
 }

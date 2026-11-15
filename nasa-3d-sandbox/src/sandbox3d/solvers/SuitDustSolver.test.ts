@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { Mesh } from 'three';
 import {
   DustAccumulator,
   EDS_ENERGY_WH_PER_M2,
   PANEL_AREA_M2,
   PANEL_NOMINAL_W,
   SUIT_FIELDS,
+  SuitDustSolver,
   dustRatePerSol,
 } from './SuitDustSolver.ts';
+import { GAIT_NAMES } from '../GaitModel.ts';
+import type { SolverContext } from './ModeSolver.ts';
 
 describe('suit telemetry fields', () => {
   it('keeps the EDS and panel cards and adds the gait cards', () => {
@@ -23,6 +27,59 @@ describe('suit telemetry fields', () => {
         expect(f.label).toContain('est.');
       }
     }
+  });
+});
+
+describe('gait card shows the gait by name', () => {
+  it('maps the numeric code to the gait names through the field text', () => {
+    const field = SUIT_FIELDS.find((f) => f.key === 'gaitCode');
+    expect(field).toBeDefined();
+    expect(field?.text).toEqual(GAIT_NAMES);
+    expect(field?.text?.[1]).toBe('walk');
+    expect(field?.text?.[2]).toBe('lope');
+    expect(field?.label).not.toContain('0 stand');
+  });
+});
+
+describe('gravity change re-evaluates the gait at once', () => {
+  function makeSolver(gravity: number): { solver: SuitDustSolver; physics: { gravity: number } } {
+    const physics = { gravity };
+    const ctx: SolverContext = {
+      vector: new Float32Array([0, 0.72, 0.28, 0.14, 255, 0.02]),
+      physics,
+      terrainMesh: new Mesh(),
+      timings: {} as SolverContext['timings'],
+    };
+    const solver = new SuitDustSolver(ctx);
+    solver.setSiteSeed(7);
+    solver.onVectorChanged();
+    return { solver, physics };
+  }
+
+  it('drops the held gait: walk on Earth, lope on the Moon in the very next update', () => {
+    const { solver, physics } = makeSolver(9.81);
+    for (let i = 0; i < 240; i++) solver.update(1 / 60, i / 60);
+    expect(solver.controller.state.gait).toBe('walk');
+    expect(solver.walker.gait).toBe('walk');
+    physics.gravity = 1.62;
+    solver.update(1 / 60, 4);
+    expect(solver.controller.state.gait).toBe('lope');
+    expect(solver.walker.gait).toBe('lope');
+    expect(solver.telemetry.gaitCode).toBe(2);
+    expect(solver.telemetry.apexHeight).toBeGreaterThan(0);
+    physics.gravity = 9.81;
+    solver.update(1 / 60, 4.1);
+    expect(solver.controller.state.gait).toBe('walk');
+    expect(solver.walker.gait).toBe('walk');
+    expect(solver.telemetry.apexHeight).toBe(0);
+  });
+
+  it('keeps hysteresis for noise at a constant g (no re-evaluation without a change)', () => {
+    const { solver } = makeSolver(1.62);
+    for (let i = 0; i < 120; i++) solver.update(1 / 60, i / 60);
+    const before = solver.controller.state.gait;
+    for (let i = 0; i < 120; i++) solver.update(1 / 60, 2 + i / 60);
+    expect(solver.controller.state.gait).toBe(before);
   });
 });
 

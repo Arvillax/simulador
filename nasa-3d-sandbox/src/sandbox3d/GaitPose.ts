@@ -6,6 +6,7 @@
  * joint swings about its local x, where a positive angle moves the limb backward (toes down at the ankle).
  */
 import type { SuitRig } from './AssetBuilder.ts';
+import { MAX_APEX_LEG_FRACTION } from './GaitModel.ts';
 import type { Gait, GaitState } from './GaitModel.ts';
 
 export type HeightFn = (x: number, z: number) => number;
@@ -33,6 +34,11 @@ const ALIGN_FULL_RAD = 0.3;
 const ALIGN_STOP_RAD = 0.8;
 /** Speed change per second of ground contact (m/s²) and stride frequency change (Hz/s). not verified. */
 const SPEED_ACCEL = 0.5;
+/**
+ * Braking limit (m/s²) while a foot is down: a long flight freezes heading and speed, so the walker must be able to
+ * shed speed within the contact before the next one. not verified.
+ */
+const SPEED_BRAKE = 1.0;
 const FREQUENCY_RATE = 0.8;
 /** Stride frequency of stepping in place while stopped and turning (Hz). not verified. */
 const TURN_FREQUENCY = 0.7;
@@ -40,9 +46,20 @@ const TURN_DUTY = 0.65;
 /** Swing-foot clearance (m). not verified. */
 const CLEARANCE_WALK = 0.07;
 const CLEARANCE_BOUNCE = 0.1;
-/** Bouncing gaits: nominal hip height as a fraction of the leg and stance compression (m). not verified. */
+/** Bouncing gaits: nominal hip height as a fraction of the leg (not verified). */
 const BOUNCE_HIP_FRACTION = 0.95;
-const BOUNCE_COMPRESSION = 0.03;
+/**
+ * Stance compression of the pelvis (m), i.e. the knee flexion on landing, grows with the vertical landing speed
+ * v = g·t / 2 of the flight before it: depth = 0.1 s · v, bounded to [0.03, 0.12] m. Gain and bounds not verified.
+ */
+export const COMPRESSION_MIN_M = 0.03;
+export const COMPRESSION_MAX_M = 0.12;
+const COMPRESSION_PER_LANDING_SPEED = 0.1;
+/** Arms open (shoulder abduction, rad) up to this angle as the pelvis rises through a flight. not verified. */
+export const ARM_OPEN_MAX_RAD = 0.5;
+/** Pelvis rise (m) at which the arms are fully open. not verified. */
+const ARM_OPEN_FULL_APEX_M = 0.15;
+const ARM_OPEN_EASE = 10;
 /** Pelvis rise easing (1/s); a fall to the leg-reach limit is immediate. */
 const PELVIS_RISE_EASE = 30;
 /** Fraction of the full leg the IK may use. */
@@ -51,6 +68,12 @@ const REACH_FRACTION = 0.999;
 /** Apex height of a ballistic flight of duration t under gravity g: h = g·t² / 8. */
 export function flightArcHeight(gravity: number, flightTime: number): number {
   return (gravity * flightTime * flightTime) / 8;
+}
+
+/** Pelvis dip at mid-stance (m) for a vertical landing speed v (m/s). */
+export function landingCompression(landingSpeed: number): number {
+  const c = COMPRESSION_PER_LANDING_SPEED * landingSpeed;
+  return c < COMPRESSION_MIN_M ? COMPRESSION_MIN_M : c > COMPRESSION_MAX_M ? COMPRESSION_MAX_M : c;
 }
 
 export interface LegIk {
@@ -201,9 +224,10 @@ export class GaitWalker {
 
   /**
    * Takes a new gait solution. Speed and stride frequency ease toward it; the gait type and duty factor switch at
-   * the next stride start (immediately on the first call after a reset). A stopped state steps in place.
+   * the next stride start (immediately on the first call after a reset, or with `immediate`, which a gravity
+   * change uses). A stopped state steps in place.
    */
-  setGait(state: GaitState, gravity: number): void {
+  setGait(state: GaitState, gravity: number, immediate = false): void {
     this.gravity = gravity;
     if (state.stopped || state.gait === 'stand' || state.strideFrequency <= 0) {
       this.pendingGait = 'stand';
@@ -219,6 +243,8 @@ export class GaitWalker {
     if (!this.hasGait) {
       this.hasGait = true;
       this.frequency = this.targetFrequency;
+      this.switchGait();
+    } else if (immediate) {
       this.switchGait();
     }
   }
@@ -285,7 +311,8 @@ export class GaitWalker {
       const align = Math.min(1, Math.max(0, (ALIGN_STOP_RAD - Math.abs(dYaw)) / (ALIGN_STOP_RAD - ALIGN_FULL_RAD)));
       const dv = this.targetSpeed * this.speedScale * align - this.speed;
       const maxDv = SPEED_ACCEL * h;
-      this.speed += dv > maxDv ? maxDv : dv < -maxDv ? -maxDv : dv;
+      const maxBrake = SPEED_BRAKE * h;
+      this.speed += dv > maxDv ? maxDv : dv < -maxBrake ? -maxBrake : dv;
     }
     const df = this.targetFrequency - this.frequency;
     const maxDf = FREQUENCY_RATE * h;
@@ -387,12 +414,17 @@ export class GaitWalker {
       const period = this.gait === 'lope' ? 1 : 0.5;
       const stance = this.gait === 'lope' ? 2 * beta : beta;
       const local = this.gait === 'lope' ? this.phase : this.phase % 0.5;
+      const flightFrac = period - stance;
+      const flightT = flightFrac / f;
       if (local < stance) {
-        offset = -BOUNCE_COMPRESSION * Math.sin((Math.PI * local) / stance);
+        // Knee flexion on landing grows with the vertical landing speed of the flight before it: v = g·t / 2.
+        offset = -landingCompression((this.gravity * flightT) / 2) * Math.sin((Math.PI * local) / stance);
       } else {
-        const flightFrac = period - stance;
+        // Ballistic arc h = g·t² / 8, kept under the model's bound (the arc is flattened, never clipped).
+        const apex = flightArcHeight(this.gravity, flightT);
+        const bound = MAX_APEX_LEG_FRACTION * d.legLength;
         const u = (local - stance) / flightFrac;
-        offset = 4 * flightArcHeight(this.gravity, flightFrac / f) * u * (1 - u);
+        offset = 4 * (apex > bound ? bound : apex) * u * (1 - u);
       }
       target = base + d.legLength * BOUNCE_HIP_FRACTION + offset;
     } else {
@@ -432,10 +464,12 @@ const _ikR = createLegIk();
 /** Cosmetic pose state carried between frames (torso lean easing). */
 export interface PoseState {
   lean: number;
+  /** Shoulder abduction (rad, both arms mirrored): arms open for balance while the pelvis is in a flight. */
+  armOpen: number;
 }
 
 export function createPoseState(): PoseState {
-  return { lean: 0 };
+  return { lean: 0, armOpen: 0 };
 }
 
 /** Forward lean (rad): suit/backpack posture, speed and uphill grade. Gains not verified. */
@@ -505,6 +539,12 @@ export function applySuitPose(
   rig.shoulderR.rotation.x = shoulderR;
   rig.elbowL.rotation.x = -0.3 - 0.4 * Math.max(0, -shoulderL);
   rig.elbowR.rotation.x = -0.3 - 0.4 * Math.max(0, -shoulderR);
+  // Arms open for balance as the pelvis rises through a flight (the longer the arc, the wider), closing on landing.
+  const airborne = bouncing && !walker.feet[0].planted && !walker.feet[1].planted;
+  const rise = airborne ? Math.min(1, walker.bounceOffset / ARM_OPEN_FULL_APEX_M) : 0;
+  pose.armOpen += (ARM_OPEN_MAX_RAD * rise - pose.armOpen) * Math.min(1, ARM_OPEN_EASE * dt);
+  rig.shoulderL.rotation.z = pose.armOpen;
+  rig.shoulderR.rotation.z = -pose.armOpen;
 
   const targetLean =
     LEAN_BASE +
