@@ -309,7 +309,15 @@ export class SandboxEngine {
     this.rocks = new RockFieldInstancer();
     this.dust = new DustSystemQuarks();
     this.walls = new BlockWalls(this.terrain.positionArray, this.terrain.detailTexture);
-    this.scene.add(this.terrain.mesh, this.walls.mesh, this.walls.rim, this.rocks.mesh, this.dust.batch, this.dust.emitter);
+    this.scene.add(
+      this.terrain.mesh,
+      this.walls.mesh,
+      this.walls.rim,
+      this.rocks.mesh,
+      this.dust.batch,
+      this.dust.emitter,
+      this.dust.puffEmitter,
+    );
 
     const ctx: SolverContext = {
       vector: etlVector,
@@ -318,6 +326,7 @@ export class SandboxEngine {
       timings: this.timings,
     };
     this.suit = new SuitDustSolver(ctx);
+    this.suit.setFootfallSink(this.dust);
     this.solvers = {
       ROVER: new RoverSolver(ctx),
       SUIT_EDS: this.suit,
@@ -477,6 +486,8 @@ export class SandboxEngine {
     this.dust.onVectorChanged(v, surface);
     this.applyPalette();
     this.placeSun();
+    // The suit's walking loop is seeded from the site seed (same site, same walk).
+    this.suit.setSiteSeed(seed);
     for (const m of SANDBOX_MODES) this.solvers[m].onVectorChanged();
     s.totalMs = performance.now() - t0;
     this.currentSeed = seed;

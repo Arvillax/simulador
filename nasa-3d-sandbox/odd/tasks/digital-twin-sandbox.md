@@ -4,8 +4,8 @@ Locator: `odd/tasks/digital-twin-sandbox.md` · Engram mirror: `odd/digital-twin
 
 ## Objective
 
-Build the parametric 3D sandbox described in `earth-analogs/plan_2_mini_simulador_3d_param_trico.md` (read-only
-context), drive it with simulated values of the 6-variable vector, add an FPS box, measure performance, and estimate
+Build the parametric 3D sandbox described in the master plan "plan 2: parametric 3D mini simulator" (kept outside
+this repository), drive it with simulated values of the 6-variable vector, add an FPS box, measure performance, and estimate
 how performance changes when the sandbox shares the browser with the geospatial viewer, the similarity search engine
 and the ETL-derived files.
 
@@ -121,17 +121,40 @@ and this task does not wait for it.
 Sequencing: T8.2 (models writer, rover first) adds an articulated suit rig (pelvis, hips, knees, ankles, shoulders,
 elbows, torso, helmet, legLength). T9 starts after T8.2 returns, in its own writer, so two writers never share files.
 
-- [ ] T9.1 — Gait model (pure, test-first): Froude scaling of speed and cadence with g and leg length, gait choice
+- [x] T9.1 — Gait model (pure, test-first): Froude scaling of speed and cadence with g and leg length, gait choice
   (walk / lope / skip) by Froude number, stance and flight phases, slope penalty and slip threshold, metabolic
   estimate. Every constant cites a source or is marked "not verified".
-- [ ] T9.2 — Gait animation: procedural joint angles from the gait phase, ground-following feet on the height field,
+- [x] T9.2 — Gait animation: procedural joint angles from the gait phase, ground-following feet on the height field,
   rock avoidance on an automatic loop across the block, dust puff per footfall from the existing dust system.
-- [ ] T9.3 — Telemetry and HUD fields: gait, speed, cadence, Froude number, stride, slip margin, metabolic rate.
+- [x] T9.3 — Telemetry and HUD fields: gait, speed, cadence, Froude number, stride, slip margin, metabolic rate.
+  Evidence (2026-11-15): GaitModel, GaitPose, WalkPath (+tests), SuitDustSolver, DustSystemQuarks, SandboxEngine.
+  Parent re-ran: tsc exit 0, vitest 16 files / 167 tests (one earlier run showed 2 WalkPath timeouts under load;
+  the isolated run and the next full run passed). Writer: build ok (949.77 kB / 249.80 kB gzip); planted feet slide
+  0 m; draw calls 37; puffs share the dust batch; gait+pose 0.03-0.07 ms per frame; route grid 2.7 ms once per
+  site change. Model values on the default vector: Moon lope 0.83 m/s, Mars walk 0.61, Earth walk 0.94.
+  Not seen in the browser (pane hidden): FPS and the look of the walk are unverified.
 - [ ] T9.4 — Verify: tsc, vitest, build; Moon/Mars/Earth side by side; SUIT mode FPS.
 
 Default decisions (user may change): automatic loop path (deterministic for the benchmark) instead of keyboard
 control; the EDS/dust behaviour of SUIT mode stays.
 
+## T10 — Gait must respond to gravity (authorized 2026-11-15)
+
+User: the walk barely changes with gravity; the jumping style should show. Diagnosis (code read): stride depends only
+on Froude; the lope comfort speed is one fixed Apollo 11 value; Mars and Earth both walk (Fr ~0.1); no two-footed
+hop; the lunar lope is timid (duty fixed 0.35, apex <= 0.15 m); hysteresis keeps the old gait after a gravity
+change; the HUD gravity select does not change the world look. Sources: docs/gait-sources.md.
+
+- [ ] T10.1 — Sources for hop/skip/lope by gravity (done by the parent, in docs/gait-sources.md).
+- [ ] T10.2 — Gravity wiring: re-evaluate the gait when g changes (no stale hysteresis), HUD gravity select also
+  sets the body look. Monotonic sweep tests over g.
+- [ ] T10.3 — Continuous model: comfort speed and the Ap threshold depend on g; Mars may lope on flat ground if the
+  physics says so; two-footed hop as a fourth gait only where the sources support it.
+- [ ] T10.4 — Visible physics: swing period ~ sqrt(L/g), ballistic arc h = g t^2/8, landing knee flexion, arm
+  balance, dust ejecta arc scaled with g; HUD shows the gait by name.
+- [ ] T10.5 — Verify: sweep tests, Moon/Mars/Earth side by side, SUIT mode FPS with the pane visible.
+
+Route: delegated writer on the Sonnet model (user request).
 ## Pending, on hold until the user says so
 
 - [ ] T7 — Replace `Float32Array(6)` with `Float32Array(7)` N1–N7 plus `targetBody: 'MOON' | 'MARS'`: N1 slope °,
@@ -148,4 +171,4 @@ control; the EDS/dust behaviour of SUIT mode stays.
 
 ## Next step
 
-T9 suit walking (delegated writer), then T8.3 HUD and T8.4 verification. T5/T6 follow.
+T10 gravity-responsive gait (Sonnet writer), then T8.3 HUD and T8.4 verification. T5/T6 follow.

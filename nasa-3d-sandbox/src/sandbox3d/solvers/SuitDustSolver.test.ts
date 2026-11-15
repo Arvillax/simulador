@@ -4,8 +4,27 @@ import {
   EDS_ENERGY_WH_PER_M2,
   PANEL_AREA_M2,
   PANEL_NOMINAL_W,
+  SUIT_FIELDS,
   dustRatePerSol,
 } from './SuitDustSolver.ts';
+
+describe('suit telemetry fields', () => {
+  it('keeps the EDS and panel cards and adds the gait cards', () => {
+    const keys = SUIT_FIELDS.map((f) => f.key);
+    expect(keys.slice(0, 6)).toEqual(['sols', 'obscurationPct', 'panelW', 'powerPct', 'edsEnergyWh', 'pulses']);
+    for (const k of ['gaitCode', 'speed', 'cadence', 'stride', 'froude', 'apollo', 'slipMarginPct', 'metabolicW']) {
+      expect(keys).toContain(k);
+    }
+  });
+
+  it('marks the gait values that rest on unverified constants', () => {
+    for (const f of SUIT_FIELDS) {
+      if (['speed', 'cadence', 'stride', 'froude', 'apollo', 'slipMarginPct', 'metabolicW'].includes(f.key)) {
+        expect(f.label).toContain('est.');
+      }
+    }
+  });
+});
 
 describe('dust obscuration model', () => {
   it('uses V^2 / R = 256 W as nominal panel power', () => {

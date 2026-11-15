@@ -5,6 +5,19 @@ import { buildSuit } from '../AssetBuilder.ts';
 import type { SuitRig } from '../AssetBuilder.ts';
 import { sampleHeight } from '../TerrainGenerator.ts';
 import { clamp01 } from '../ScratchMath.ts';
+import { GAIT_CODE, createPuffParams, footfallPuff } from '../GaitModel.ts';
+import type { PuffParams } from '../GaitModel.ts';
+import { GaitWalker, applySuitPose, createPoseState } from '../GaitPose.ts';
+import { WalkController, feetGroundHeight } from '../WalkPath.ts';
+
+/** Receives one dust puff per footfall (the engine wires the dust system here). */
+export interface FootfallSink {
+  footfallPuff(x: number, y: number, z: number, puff: PuffParams, gravity: number): void;
+}
+
+/** The camera follows a low-passed walker position (time constant, s), so the pelvis bob never shakes it. */
+const FOCUS_SMOOTHING_S = 0.5;
+const FOCUS_HEIGHT_M = 1.3;
 
 export const PANEL_VOLTAGE_V = 32;
 export const PANEL_RESISTANCE_OHM = 4;
@@ -77,15 +90,38 @@ export type SuitTelemetry = {
   powerPct: number;
   edsEnergyWh: number;
   pulses: number;
+  /** GAIT_CODE: 0 stand, 1 walk, 2 lope, 3 run. */
+  gaitCode: number;
+  speed: number;
+  cadence: number;
+  stride: number;
+  froude: number;
+  apollo: number;
+  slipMarginPct: number;
+  metabolicW: number;
+  /** Not shown as a card; airborne time per stride (s). */
+  flightTime: number;
 };
 
-const SUIT_FIELDS: readonly TelemetryField[] = [
+/**
+ * EDS and panel cards first, then the gait. "est." marks values that rest on constants marked "not verified" in
+ * GaitModel.ts (comfortable walk speed, roughness and slope penalties, friction, cost of transport).
+ */
+export const SUIT_FIELDS: readonly TelemetryField[] = [
   { key: 'sols', label: 'Elapsed', unit: 'sols', digits: 1 },
   { key: 'obscurationPct', label: 'Obscuration', unit: '%', digits: 2 },
   { key: 'panelW', label: 'Panel power', unit: 'W', digits: 1 },
   { key: 'powerPct', label: 'Power', unit: '%', digits: 1 },
   { key: 'edsEnergyWh', label: 'EDS energy', unit: 'Wh', digits: 3 },
   { key: 'pulses', label: 'EDS pulses', unit: '', digits: 0 },
+  { key: 'gaitCode', label: 'Gait (0 stand · 1 walk · 2 lope · 3 run)', unit: '', digits: 0 },
+  { key: 'speed', label: 'Speed est.', unit: 'm/s', digits: 2 },
+  { key: 'cadence', label: 'Cadence est.', unit: 'steps/min', digits: 0 },
+  { key: 'stride', label: 'Stride est.', unit: 'm', digits: 2 },
+  { key: 'froude', label: 'Froude number est.', unit: '', digits: 2 },
+  { key: 'apollo', label: 'Apollo number est.', unit: '', digits: 2 },
+  { key: 'slipMarginPct', label: 'Slip margin est.', unit: '%', digits: 0 },
+  { key: 'metabolicW', label: 'Metabolic rate est.', unit: 'W', digits: 0 },
 ];
 
 export class SuitDustSolver implements ModeSolver {
@@ -93,11 +129,39 @@ export class SuitDustSolver implements ModeSolver {
   readonly group = new Group();
   readonly focus = new Vector3();
   readonly fields = SUIT_FIELDS;
-  readonly note = `Time scale: 1 s = ${SUIT_SOLS_PER_SECOND} sols · EDS ${EDS_VOLTAGE_VPP} Vpp @ ${EDS_FREQUENCY_HZ} Hz · panel ${PANEL_AREA_M2} m²`;
-  readonly telemetry: SuitTelemetry = { sols: 0, obscurationPct: 0, panelW: 0, powerPct: 0, edsEnergyWh: 0, pulses: 0 };
+  readonly note =
+    `Time scale: 1 s = ${SUIT_SOLS_PER_SECOND} sols · EDS ${EDS_VOLTAGE_VPP} Vpp @ ${EDS_FREQUENCY_HZ} Hz · panel ${PANEL_AREA_M2} m²` +
+    ' · gait from Froude / Apollo number, est. = rests on unverified constants';
+  readonly telemetry: SuitTelemetry = {
+    sols: 0,
+    obscurationPct: 0,
+    panelW: 0,
+    powerPct: 0,
+    edsEnergyWh: 0,
+    pulses: 0,
+    gaitCode: 0,
+    speed: 0,
+    cadence: 0,
+    stride: 0,
+    froude: 0,
+    apollo: 0,
+    slipMarginPct: 0,
+    metabolicW: 0,
+    flightTime: 0,
+  };
   readonly dust = new DustAccumulator();
+  /** Walker state, steering and gait (read-only for callers; exposed for inspection). */
+  readonly walker: GaitWalker;
+  readonly controller = new WalkController();
+  /** CPU time of gait, path and pose in the last update (ms). */
+  gaitMs = 0;
   private readonly ctx: SolverContext;
   private readonly rig: SuitRig;
+  private readonly pose = createPoseState();
+  private readonly puff = createPuffParams();
+  private footfallSink: FootfallSink | null = null;
+  private siteSeed = 1;
+  private lastFootfalls = 0;
   private edsFlash = 0;
 
   constructor(ctx: SolverContext) {
@@ -105,16 +169,41 @@ export class SuitDustSolver implements ModeSolver {
     this.rig = buildSuit();
     this.group.name = 'mode-suit-eds';
     this.group.add(this.rig.root);
+    const rig = this.rig;
+    this.walker = new GaitWalker({
+      hipHalfWidth: Math.abs(rig.hipL.position.x),
+      thigh: Math.abs(rig.kneeL.position.y),
+      shin: Math.abs(rig.ankleL.position.y),
+      ankleHeight: rig.legLength - Math.abs(rig.kneeL.position.y) - Math.abs(rig.ankleL.position.y),
+      legLength: rig.legLength,
+      footLength: rig.footLength,
+    });
+  }
+
+  /** Dust system that receives the footfall puffs. */
+  setFootfallSink(sink: FootfallSink | null): void {
+    this.footfallSink = sink;
+  }
+
+  /** Site seed of the next synthesis: the walking loop is seeded from it, so a site always walks the same way. */
+  setSiteSeed(seed: number): void {
+    this.siteSeed = seed;
   }
 
   activate(): void {}
 
   deactivate(): void {}
 
+  /** Restarts the walk from the block centre on the new terrain (allocation here only: the loop PRNG). */
   onVectorChanged(): void {
-    const ground = sampleHeight(0, 0);
-    this.rig.root.position.set(0, ground, 0);
-    this.focus.set(0, ground + 1.3, 0);
+    const c = this.controller;
+    c.gravity = this.ctx.physics.gravity;
+    c.reset(this.siteSeed, this.ctx.vector[1], this.rig.legLength, 0, 0);
+    this.walker.reset(0, 0, c.path.heading, feetGroundHeight);
+    this.lastFootfalls = 0;
+    this.pose.lean = 0;
+    applySuitPose(this.rig, this.walker, 0, 0, 0, this.pose);
+    this.focus.set(0, this.walker.groundY + FOCUS_HEIGHT_M, 0);
     this.writeTelemetry();
   }
 
@@ -134,8 +223,31 @@ export class SuitDustSolver implements ModeSolver {
     rig.panelMaterial.uniforms.uEdsFlash.value = this.edsFlash;
     // Joint seal abrasion: clean grey toward regolith tint.
     rig.sealMaterial.color.setRGB(0.72 - 0.17 * o, 0.74 - 0.27 * o, 0.76 - 0.4 * o);
+
+    // Walk: fixed-step gait, path and feet; then the pose, the footfall puffs and the camera focus.
+    const g0 = performance.now();
+    const g = this.ctx.physics.gravity;
+    const c = this.controller;
+    const w = this.walker;
+    c.gravity = g;
+    w.advance(dt, c, sampleHeight, feetGroundHeight);
+    applySuitPose(rig, w, c.state.froude, c.grade, dt, this.pose);
     rig.elbow.rotation.z = -0.55 - 0.45 * Math.sin(t * 1.3);
     rig.shoulder.rotation.z = 0.15 + 0.1 * Math.sin(t * 0.65);
+    if (w.footfalls !== this.lastFootfalls) {
+      this.lastFootfalls = w.footfalls;
+      const sink = this.footfallSink;
+      if (sink !== null) {
+        footfallPuff(w.speed, g, this.puff);
+        sink.footfallPuff(w.lastFootfallX, w.lastFootfallY, w.lastFootfallZ, this.puff, g);
+      }
+    }
+    const k = dt > 0 ? 1 - Math.exp(-dt / FOCUS_SMOOTHING_S) : 0;
+    const f = this.focus;
+    f.x += (w.x - f.x) * k;
+    f.y += (w.groundY + FOCUS_HEIGHT_M - f.y) * k;
+    f.z += (w.z - f.z) * k;
+    this.gaitMs = performance.now() - g0;
     this.writeTelemetry();
   }
 
@@ -148,5 +260,15 @@ export class SuitDustSolver implements ModeSolver {
     t.powerPct = (d.powerW / PANEL_NOMINAL_W) * 100;
     t.edsEnergyWh = d.edsEnergyWh;
     t.pulses = d.pulses;
+    const s = this.controller.state;
+    t.gaitCode = GAIT_CODE[s.gait];
+    t.speed = s.speed;
+    t.cadence = s.cadence;
+    t.stride = s.strideLength;
+    t.froude = s.froude;
+    t.apollo = s.apollo;
+    t.slipMarginPct = s.slipMargin * 100;
+    t.metabolicW = s.metabolicW;
+    t.flightTime = s.flightTime;
   }
 }

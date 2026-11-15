@@ -5,6 +5,7 @@ import {
   BatchedRenderer,
   Bezier,
   ColorOverLife,
+  ConeEmitter,
   ConstantColor,
   ConstantValue,
   Gradient,
@@ -20,6 +21,7 @@ import {
 } from 'three.quarks';
 import type { SurfaceClass } from './TerrainGenerator.ts';
 import { PLOT_SIZE } from './TerrainGenerator.ts';
+import type { PuffParams } from './GaitModel.ts';
 import { DEG2RAD, clamp01 } from './ScratchMath.ts';
 
 export const MAX_DUST_PARTICLES = 4000;
@@ -27,6 +29,11 @@ const LIFE_MIN_S = 3;
 const LIFE_MAX_S = 5;
 /** Emission rate at thermal inertia 0; rate × max life stays within the 4000-particle budget. */
 export const MAX_EMISSION_PER_S = MAX_DUST_PARTICLES / LIFE_MAX_S - 20;
+/** Footfall puffs live in what the drifting dust leaves of the budget (4000 − 780 · 5 = 100 motes). */
+export const PUFF_MAX_PARTICLES = MAX_DUST_PARTICLES - MAX_EMISSION_PER_S * LIFE_MAX_S;
+/** Cone half-angle of the kicked dust (rad), around 45° launches. Visual choice, not verified. */
+const PUFF_CONE_RAD = 0.8;
+const PUFF_ALPHA = 0.55;
 export const MAX_DUST_OPACITY = 0.6;
 export const EDS_SWEEP_DURATION_S = 0.6;
 export const EDS_SWEEP_ACCEL = 16;
@@ -77,6 +84,17 @@ export class DustSystemQuarks {
   private readonly sweepMagnitude = new ConstantValue(0);
   private readonly limit: LimitSpeedOverLife;
   private readonly shape: GridEmitter;
+  /**
+   * Footfall puffs: a second system in the same batch (same material and render mode, so no extra draw call).
+   * Motes leave the boot in a cone and fall under the body's gravity: a ballistic arc.
+   */
+  readonly puffSystem: ParticleSystem;
+  readonly puffEmitter: Object3D;
+  private readonly puffColor = new QuarksVector4(0.6, 0.55, 0.5, PUFF_ALPHA);
+  private readonly puffSpeed = new IntervalValue(0.2, 0.5);
+  private readonly puffLife = new IntervalValue(0.3, 0.6);
+  private readonly puffSize = new IntervalValue(0.04, 0.08);
+  private readonly puffGravity = new ConstantValue(1.62);
   private sweepTimer = 0;
   /** True once the engine has set a body tint; until then the tint follows the surface class. */
   private bodyTinted = false;
@@ -131,6 +149,42 @@ export class DustSystemQuarks {
     this.emitter.rotation.order = 'ZYX';
     this.emitter.rotation.set(-Math.PI / 2, 0, 0);
     this.batch.addSystem(this.system);
+
+    this.puffSystem = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      prewarm: false,
+      worldSpace: true,
+      shape: new ConeEmitter({ radius: 0.08, angle: PUFF_CONE_RAD, thickness: 1, arc: Math.PI * 2 }),
+      startLife: this.puffLife,
+      startSpeed: this.puffSpeed,
+      startSize: this.puffSize,
+      startColor: new ConstantColor(this.puffColor),
+      emissionOverTime: new ConstantValue(0),
+      material,
+      renderMode: RenderMode.BillBoard,
+      behaviors: [
+        new ApplyForce(new QuarksVector3(0, -1, 0), this.puffGravity),
+        new ColorOverLife(
+          new Gradient(
+            [
+              [new QuarksVector3(1, 1, 1), 0],
+              [new QuarksVector3(1, 1, 1), 1],
+            ],
+            [
+              [0.4, 0],
+              [1, 0.15],
+              [0.6, 0.7],
+              [0, 1],
+            ],
+          ),
+        ),
+      ],
+    });
+    this.puffEmitter = this.puffSystem.emitter;
+    this.puffEmitter.name = 'dust-puff-emitter';
+    this.puffEmitter.rotation.set(-Math.PI / 2, 0, 0); // cone axis (+z local) points up
+    this.batch.addSystem(this.puffSystem);
     // The batch shader applies the renderer's tone mapping but not its output encoding, which leaves the motes
     // too dark on bright worlds. Turn tone mapping off here; `setTint` takes display-referred colours instead.
     this.batch.traverse((object) => {
@@ -140,7 +194,29 @@ export class DustSystemQuarks {
   }
 
   get particleCount(): number {
-    return this.system.particleNum;
+    return this.system.particleNum + this.puffSystem.particleNum;
+  }
+
+  /**
+   * Queues one footfall puff at (x, y, z); it spawns on the next `update`. Kick speed, life, size and count come
+   * from the gait model (`footfallPuff`); gravity pulls the motes back down. Capped by PUFF_MAX_PARTICLES.
+   * No allocation.
+   */
+  footfallPuff(x: number, y: number, z: number, puff: PuffParams, gravity: number): void {
+    const state = this.puffSystem.emissionState;
+    const room = PUFF_MAX_PARTICLES - this.puffSystem.particleNum - Math.max(0, state.waitEmiting);
+    const count = Math.min(puff.count, Math.floor(room));
+    if (count <= 0) return;
+    this.puffEmitter.position.set(x, y + 0.03, z);
+    this.puffEmitter.updateMatrixWorld(true);
+    this.puffSpeed.a = 0.6 * puff.kickSpeed;
+    this.puffSpeed.b = puff.kickSpeed;
+    this.puffLife.a = 0.6 * puff.life;
+    this.puffLife.b = puff.life;
+    this.puffSize.a = 0.6 * puff.size;
+    this.puffSize.b = puff.size;
+    this.puffGravity.value = gravity;
+    state.waitEmiting += count;
   }
 
   /**
@@ -150,6 +226,7 @@ export class DustSystemQuarks {
   setTint(r: number, g: number, b: number): void {
     this.bodyTinted = true;
     this.startColor.set(r, g, b, this.startColor.w);
+    this.puffColor.set(r, g, b, PUFF_ALPHA);
   }
 
   /** Emission rate and opacity ∝ (1 - thermal inertia). Without a body tint the colour follows the surface class. */
@@ -161,6 +238,7 @@ export class DustSystemQuarks {
       if (surface === 'ICE') this.startColor.set(0.86, 0.89, 0.93, this.startColor.w);
       else if (surface === 'BASALT') this.startColor.set(0.45, 0.45, 0.47, this.startColor.w);
       else this.startColor.set(0.74, 0.54, 0.37, this.startColor.w);
+      this.puffColor.set(this.startColor.x, this.startColor.y, this.startColor.z, PUFF_ALPHA);
     }
     const slope = vector[0] * DEG2RAD;
     this.emitter.rotation.set(-Math.PI / 2, 0, slope);
