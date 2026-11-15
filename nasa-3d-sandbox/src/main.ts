@@ -32,6 +32,9 @@ const handle = mountSandbox(app);
 window.__sandbox = handle;
 window.__mountSandbox = mountSandbox;
 
+// TODO: add the visualizer route manually.
+document.querySelector<HTMLButtonElement>('.back-button')?.addEventListener('click', () => {});
+
 // ------------------------------------------------------------------ Benchmark (standalone only; omitted in ?embed=1)
 if (!handle.embed) {
   const { engine, bridge, presets, startup } = handle;
