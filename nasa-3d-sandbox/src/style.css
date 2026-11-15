@@ -1,0 +1,473 @@
+:root {
+  --bg: #05070c;
+  --panel: rgba(12, 16, 26, 0.86);
+  --panel-border: rgba(140, 170, 220, 0.18);
+  --text: #e6ebf5;
+  --muted: #8d98ad;
+  --accent: #5fb4ff;
+  --accent-strong: #2f8cff;
+  --warn: #ffc400;
+  --ok: #5fe3a1;
+  --radius: 8px;
+  font-family: Inter, 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--bg);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+}
+
+.viewport {
+  position: absolute;
+  inset: 0;
+}
+
+.sandbox-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+/* ------------------------------------------------------------------ HUD */
+.hud {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  bottom: 12px;
+  width: min(330px, calc(100vw - 24px));
+  overflow-y: auto;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(6px);
+  scrollbar-width: thin;
+}
+
+.hud-header {
+  margin-bottom: 10px;
+}
+
+.hud-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.hud-subtitle {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.hud-section {
+  padding: 10px 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.hud-heading {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.hud-mode-grid,
+.hud-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.hud-actions {
+  margin-top: 6px;
+}
+
+.hud-button {
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.hud-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.hud-button:focus-visible,
+.hud-select:focus-visible,
+.hud-number:focus-visible,
+.hud-range:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.hud-mode.is-active {
+  background: rgba(47, 140, 255, 0.28);
+  border-color: var(--accent);
+}
+
+.hud-accent {
+  border-color: rgba(95, 180, 255, 0.55);
+}
+
+.hud-sim-note {
+  margin: 0 0 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--warn);
+  background: rgba(255, 196, 0, 0.08);
+  border: 1px solid rgba(255, 196, 0, 0.3);
+  border-radius: 6px;
+}
+
+.hud-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+}
+
+.hud-field-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.hud-select,
+.hud-number {
+  width: 100%;
+  padding: 5px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.hud-row {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 8px;
+}
+
+.hud-slider {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.hud-slider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.hud-slider-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+.hud-range {
+  width: 100%;
+  margin: 2px 0 0;
+  accent-color: var(--accent-strong);
+}
+
+.hud-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.hud-cards[hidden] {
+  display: none;
+}
+
+.hud-card {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.hud-card-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.hud-card-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.hud-card-value {
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-card-unit {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.hud-note,
+.hud-synth {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------ FPS box */
+.fps-box {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 168px;
+  padding: 8px 10px;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  pointer-events: none;
+}
+
+.fps-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.fps-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ok);
+}
+
+.fps-unit {
+  color: var(--muted);
+}
+
+.fps-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1px 8px;
+  margin: 4px 0 6px;
+}
+
+.fps-rows dt {
+  color: var(--muted);
+}
+
+.fps-rows dd {
+  margin: 0;
+  text-align: right;
+}
+
+.fps-spark {
+  display: block;
+  width: 100%;
+  height: 32px;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+}
+
+@media (max-width: 640px) {
+  .hud {
+    top: auto;
+    height: 46vh;
+    width: calc(100vw - 24px);
+  }
+}
+
+/* ------------------------------------------------------------------ Benchmark */
+.bench-viewer-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  width: 50%;
+  height: 100%;
+  pointer-events: none;
+  border-right: 1px solid var(--panel-border);
+}
+
+.bench-sim-badge {
+  position: absolute;
+  right: calc(50% + 12px);
+  bottom: 12px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--warn);
+  background: rgba(12, 16, 26, 0.9);
+  border: 1px solid rgba(255, 196, 0, 0.4);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.bench-panel {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  max-width: min(420px, calc(100vw - 24px));
+}
+
+.bench-button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.bench-status {
+  margin: 0;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: pre-line;
+  text-align: right;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.bench-overlay {
+  position: absolute;
+  top: 12px;
+  right: 192px;
+  bottom: 12px;
+  left: 12px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  overflow: hidden;
+  background: rgba(8, 11, 18, 0.96);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+}
+
+.bench-overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bench-overlay-title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.bench-overlay-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.bench-overlay-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.bench-table-wrap {
+  flex: 1;
+  overflow: auto;
+}
+
+.bench-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bench-table th,
+.bench-table td {
+  padding: 4px 6px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.bench-table th:nth-child(2),
+.bench-table td:nth-child(2),
+.bench-table th:last-child,
+.bench-table td:last-child {
+  text-align: left;
+  white-space: normal;
+}
+
+.bench-table th {
+  position: sticky;
+  top: 0;
+  color: var(--muted);
+  font-weight: 600;
+  background: rgba(8, 11, 18, 0.98);
+}
+
+.bench-table tr.is-error td {
+  color: #ff8a80;
+}
+
+.bench-raw summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.bench-json {
+  width: 100%;
+  height: 160px;
+  margin-top: 6px;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+@media (max-width: 640px) {
+  .bench-panel {
+    bottom: calc(46vh + 24px);
+  }
+
+  .bench-overlay {
+    right: 12px;
+  }
+}
