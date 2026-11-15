@@ -1,5 +1,8 @@
 import type { Group, Mesh, Vector3 } from 'three';
-import type { FrameTimings, SandboxMode } from '../SandboxEngine.ts';
+import type { FrameTimings } from '../SandboxEngine.ts';
+import type { SandboxMode, SimTelemetryAlertDetail, SitePhysicsState } from '../../bridge/copilotContract.ts';
+
+export type SolverAlertPayload = Omit<SimTelemetryAlertDetail, 'source' | 'timestampMs'>;
 
 /** Describes one telemetry card in the HUD. `key` names a numeric field of the solver telemetry object. */
 export interface TelemetryField {
@@ -19,9 +22,12 @@ export interface SolverContext {
   /** [slope_deg, tri, thermal_inertia, albedo, temp_K, ndvi] (the bridge's etlVector). */
   readonly vector: Float32Array;
   readonly physics: PhysicsState;
+  readonly site: SitePhysicsState;
   readonly terrainMesh: Mesh;
   /** Engine frame timings; the LiDAR solver writes lidarMs here. */
   readonly timings: FrameTimings;
+  /** Emits a deduplicated threshold alert back to Copilot UI / parent iframe. */
+  readonly emitAlert: (alert: SolverAlertPayload) => void;
 }
 
 export interface ModeSolver {

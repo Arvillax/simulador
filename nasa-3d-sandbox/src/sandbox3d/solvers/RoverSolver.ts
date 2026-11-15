@@ -1,5 +1,6 @@
 import { Group, Vector3 } from 'three';
-import type { SandboxMode } from '../SandboxEngine.ts';
+import type { Body } from '../BodyLook.ts';
+import type { OperationalStatus, RoverProfile, SandboxMode } from '../../bridge/copilotContract.ts';
 import type { ModeSolver, SolverContext, TelemetryField } from './ModeSolver.ts';
 import {
   ARM_INSET,
@@ -201,6 +202,43 @@ export function solveRockerBogie(
   return out;
 }
 
+export interface RoverLimits {
+  readonly slopeGreenMaxDeg: number;
+  readonly slopeYellowMaxDeg: number;
+  readonly hazardRedM: number;
+  readonly slipRed: number;
+}
+
+const VIPER_LIMITS: RoverLimits = { slopeGreenMaxDeg: 10, slopeYellowMaxDeg: 15, hazardRedM: 0.2, slipRed: 0.6 };
+const CURIOSITY_LIMITS: RoverLimits = { slopeGreenMaxDeg: 20, slopeYellowMaxDeg: 30, hazardRedM: 0.5, slipRed: 0.6 };
+const PERSEVERANCE_LIMITS: RoverLimits = { slopeGreenMaxDeg: 20, slopeYellowMaxDeg: 30, hazardRedM: 0.525, slipRed: 0.6 };
+
+export function roverLimitsForProfile(profile: RoverProfile): RoverLimits {
+  if (profile === 'VIPER') return VIPER_LIMITS;
+  if (profile === 'CURIOSITY') return CURIOSITY_LIMITS;
+  return PERSEVERANCE_LIMITS;
+}
+
+export function evaluateRoverEnvelope(
+  profile: RoverProfile,
+  body: Body,
+  slopeDeg: number,
+  slip: number,
+  obstacleM = 0,
+): OperationalStatus {
+  const limits = roverLimitsForProfile(profile);
+  if (slopeDeg > limits.slopeYellowMaxDeg || slip >= limits.slipRed || obstacleM > limits.hazardRedM) return 'red';
+  if (slopeDeg > limits.slopeGreenMaxDeg) return 'yellow';
+  if (body === 'moon' && slip > 0.2) return 'yellow';
+  if (body !== 'moon' && slip >= 0.4) return 'yellow';
+  return 'green';
+}
+
+const ALERT_SLOPE = 1;
+const ALERT_SLIP = 2;
+const ALERT_LUNAR_1_6G = 4;
+const ALERT_OBSTACLE = 8;
+
 // ---------------------------------------------------------------------------------------------------------------
 // Solver
 // ---------------------------------------------------------------------------------------------------------------
@@ -218,6 +256,7 @@ export type RoverTelemetry = {
   speedMps: number;
   reserveN: number;
   gravity: number;
+  slopeLimitDeg: number;
 };
 
 const ROVER_FIELDS: readonly TelemetryField[] = [
@@ -229,6 +268,7 @@ const ROVER_FIELDS: readonly TelemetryField[] = [
   { key: 'speedMps', label: 'Ground speed', unit: 'm/s', digits: 3 },
   { key: 'reserveN', label: 'Traction reserve', unit: 'N', digits: 0 },
   { key: 'gravity', label: 'Gravity', unit: 'm/s²', digits: 2 },
+  { key: 'slopeLimitDeg', label: 'Slope limit', unit: '°', digits: 0 },
 ];
 
 export class RoverSolver implements ModeSolver {
@@ -236,7 +276,7 @@ export class RoverSolver implements ModeSolver {
   readonly group = new Group();
   readonly focus = new Vector3();
   readonly fields = ROVER_FIELDS;
-  readonly note = 'Bekker-Wong / Janosi-Hanamoto · 900 kg · r = 0.25 m, b = 0.20 m, l = 0.10 m';
+  readonly note = 'Bekker-Wong / Janosi-Hanamoto · VIPER (15° Moon) / Perseverance (30° Mars) · slip stall ≥ 60%';
   readonly telemetry: RoverTelemetry = {
     pitchDeg: 0,
     rollDeg: 0,
@@ -246,6 +286,7 @@ export class RoverSolver implements ModeSolver {
     speedMps: 0,
     reserveN: 0,
     gravity: 0,
+    slopeLimitDeg: 15,
   };
   private readonly ctx: SolverContext;
   private readonly rig: RoverRig;
@@ -255,6 +296,7 @@ export class RoverSolver implements ModeSolver {
   private readonly hubY = new Float64Array(6);
   private x = -6;
   private spin = 0;
+  private activeAlerts = 0;
 
   constructor(ctx: SolverContext) {
     this.ctx = ctx;
@@ -263,13 +305,18 @@ export class RoverSolver implements ModeSolver {
     this.group.add(this.rig.root);
   }
 
-  activate(): void {}
+  activate(): void {
+    this.activeAlerts = 0;
+    this.checkAlerts(0, false);
+  }
 
   deactivate(): void {}
 
   onVectorChanged(): void {
-    soilFromVector(this.ctx.vector[2], this.ctx.vector[5], this.soil);
-    this.placeRig(0);
+    const effectiveNdvi = this.ctx.site.body === 'earth' ? this.ctx.vector[5] : 0;
+    soilFromVector(this.ctx.vector[2], effectiveNdvi, this.soil);
+    this.activeAlerts = 0;
+    this.placeRig(0, true);
   }
 
   update(dt: number, _t: number): void {
@@ -278,20 +325,23 @@ export class RoverSolver implements ModeSolver {
     this.x += speed * dt;
     if (this.x > LANE_X_MAX) this.x = LANE_X_MIN;
     this.spin -= WHEEL_OMEGA * dt;
-    this.placeRig(speed);
+    this.placeRig(speed, true);
   }
 
-  private placeRig(speed: number): void {
+  private placeRig(speed: number, emitAlerts: boolean): void {
     const v = this.ctx.vector;
     const gravity = this.ctx.physics.gravity;
     solveWheel(v[0] * DEG2RAD, (ROVER_MASS * gravity) / WHEEL_COUNT, this.soil, this.wheel);
     const sink = this.wheel.zTotal;
     const rig = this.rig;
     const hub = this.hubY;
+    let maxRockRelief = 0;
     for (let i = 0; i < 6; i++) {
       const wx = this.x + WHEEL_X[i];
       const wz = LANE_Z + WHEEL_Z[i];
-      hub[i] = sampleHeight(wx, wz) + rockReliefAt(wx, wz) + WHEEL_RADIUS - sink;
+      const rockH = rockReliefAt(wx, wz);
+      if (rockH > maxRockRelief) maxRockRelief = rockH;
+      hub[i] = sampleHeight(wx, wz) + rockH + WHEEL_RADIUS - sink;
       const wheel = rig.wheels[i];
       wheel.position.set(WHEEL_X[i], hub[i], WHEEL_Z[i]);
       wheel.rotation.z = this.spin;
@@ -323,6 +373,7 @@ export class RoverSolver implements ModeSolver {
     rig.root.position.set(this.x, 0, LANE_Z);
     this.focus.set(this.x, 0.5 * (mainL + mainR), LANE_Z);
 
+    const limits = roverLimitsForProfile(this.ctx.site.roverProfile);
     const t = this.telemetry;
     t.pitchDeg = pose.pitch * RAD2DEG;
     t.rollDeg = pose.roll * RAD2DEG;
@@ -332,5 +383,88 @@ export class RoverSolver implements ModeSolver {
     t.reserveN = this.wheel.reserveN * WHEEL_COUNT;
     t.speedMps = speed;
     t.gravity = gravity;
+    t.slopeLimitDeg = limits.slopeYellowMaxDeg;
+
+    if (emitAlerts) this.checkAlerts(maxRockRelief, true);
+  }
+
+  private checkAlerts(maxRockRelief: number, onlyWhenActive: boolean): void {
+    if (onlyWhenActive && !this.group.visible) return;
+    const site = this.ctx.site;
+    const limits = roverLimitsForProfile(site.roverProfile);
+    const slope = this.ctx.vector[0];
+    const slip = this.wheel.slip;
+
+    if (slope > limits.slopeYellowMaxDeg) {
+      if ((this.activeAlerts & ALERT_SLOPE) === 0) {
+        this.activeAlerts |= ALERT_SLOPE;
+        this.ctx.emitAlert({
+          code: 'ROVER_SLOPE_EXCEEDED',
+          mode: 'ROVER',
+          body: site.body,
+          severity: 'red',
+          message: `Slope ${slope.toFixed(1)}° exceeds ${site.roverProfile} limit (${limits.slopeYellowMaxDeg}°).`,
+          metric: 'slope_deg',
+          value: slope,
+          threshold: limits.slopeYellowMaxDeg,
+        });
+      }
+    } else {
+      this.activeAlerts &= ~ALERT_SLOPE;
+    }
+
+    if (slip >= limits.slipRed) {
+      if ((this.activeAlerts & ALERT_SLIP) === 0) {
+        this.activeAlerts |= ALERT_SLIP;
+        this.ctx.emitAlert({
+          code: 'ROVER_SLIP_CRITICAL',
+          mode: 'ROVER',
+          body: site.body,
+          severity: 'red',
+          message: `Wheel slip ${(slip * 100).toFixed(1)}% reached VO halt threshold (≥ ${(limits.slipRed * 100).toFixed(0)}%).`,
+          metric: 'wheel_slip',
+          value: slip,
+          threshold: limits.slipRed,
+        });
+      }
+    } else {
+      this.activeAlerts &= ~ALERT_SLIP;
+    }
+
+    if (site.body === 'moon' && slip > 0.2 && slip < limits.slipRed) {
+      if ((this.activeAlerts & ALERT_LUNAR_1_6G) === 0) {
+        this.activeAlerts |= ALERT_LUNAR_1_6G;
+        this.ctx.emitAlert({
+          code: 'ROVER_LUNAR_1_6G_CAUTION',
+          mode: 'ROVER',
+          body: site.body,
+          severity: 'yellow',
+          message: `Lunar 1/6 g warning: slip ${(slip * 100).toFixed(1)}% > 20%; real 1/6 g drawbar pull can drop ≥ 20% with ≤ 40% more sinkage.`,
+          metric: 'wheel_slip',
+          value: slip,
+          threshold: 0.2,
+        });
+      }
+    } else {
+      this.activeAlerts &= ~ALERT_LUNAR_1_6G;
+    }
+
+    if (maxRockRelief > limits.hazardRedM) {
+      if ((this.activeAlerts & ALERT_OBSTACLE) === 0) {
+        this.activeAlerts |= ALERT_OBSTACLE;
+        this.ctx.emitAlert({
+          code: 'ROVER_OBSTACLE_EXCEEDED',
+          mode: 'ROVER',
+          body: site.body,
+          severity: 'red',
+          message: `Rock clearance ${maxRockRelief.toFixed(2)} m exceeds ${site.roverProfile} hazard threshold (${limits.hazardRedM.toFixed(2)} m).`,
+          metric: 'rock_relief_m',
+          value: maxRockRelief,
+          threshold: limits.hazardRedM,
+        });
+      }
+    } else {
+      this.activeAlerts &= ~ALERT_OBSTACLE;
+    }
   }
 }
